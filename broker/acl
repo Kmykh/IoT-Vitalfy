@@ -1,0 +1,14 @@
+# Permisos por tópico (formato acl_file de Mosquitto).
+
+# Backend (adaptador MQTT de la fase 7): lee la telemetría y el estado de todos los wearables
+# y puede enviarles comandos.
+user vitalify-backend
+topic read device/+/telemetria
+topic read device/+/estado
+topic write device/+/comandos
+
+# Wearables: el usuario MQTT es el código del dispositivo (%u). Cada uno solo publica en sus
+# propios tópicos y solo lee sus propios comandos: un sensor no puede hacerse pasar por otro.
+pattern write device/%u/telemetria
+pattern write device/%u/estado
+pattern read device/%u/comandos

@@ -1,0 +1,24 @@
+# Broker MQTT de Vitalify. Desde esta carpeta:
+#   cp .env.example .env     (una vez; completa las claves)
+#   docker compose up -d
+#   ./escuchar.sh            (ver en vivo lo que publican los wearables)
+name: vitalify-broker
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: vitalify-mosquitto
+    ports:
+      - "1883:1883"  # en todas las interfaces de la laptop: el ESP32 llega por Wi-Fi
+    env_file: .env
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./acl:/vitalify/acl:ro
+      - ./iniciar.sh:/iniciar.sh:ro
+      - datos:/mosquitto/data
+    command: ["sh", "/iniciar.sh"]
+    restart: unless-stopped
+
+volumes:
+  datos:
+    name: vitalify-mosquitto-datos
