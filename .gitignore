@@ -1,0 +1,9 @@
+# Claves: nunca se versionan (las plantillas son secretos.example.h y broker/.env.example)
+tesis/secretos.h
+broker/.env
+
+# Salidas de compilación y de las pruebas
+tesis/build/
+tesis/pruebas/salida/
+
+.DS_Store
