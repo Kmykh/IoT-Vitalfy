@@ -59,6 +59,8 @@ docker compose up -d
 ./escuchar.sh             # muestra en vivo lo que publican los wearables
 ```
 
+Sin Terminal: en **Docker Desktop → Containers → vitalify-broker → vitalify-monitor → Logs** aparece cada JSON que llega. El log del contenedor `mosquitto` solo registra conexiones, nunca el contenido de los mensajes.
+
 - La laptop y el ESP32 deben estar en la **misma red Wi-Fi**.
 - El ESP32 encuentra el broker por el nombre mDNS de la laptop (`MacBook-Air-de-Mayck.local`, en `config.h`), así que no importa si el DHCP le cambia la IP. Si una red bloquea mDNS, pon la IP de la laptop en esa red en `secretos.h`.
 - No hay acceso anónimo: el backend entra como `vitalify-backend` y cada wearable con su código como usuario. El ACL solo deja a cada wearable publicar en sus propios tópicos.
@@ -105,13 +107,17 @@ La tecla `p` en el monitor activa el trazado del ECG para el Serial Plotter. En 
 | Módulo | Pines | Notas |
 |---|---|---|
 | MAX30102, ADXL345, OLED 128x64 | SDA → GPIO5, SCL → GPIO6 | Bus I2C 0 a 400 kHz (0x57, 0x53, 0x3C) |
-| OLED 128x32 (ECG) | SDA → GPIO7, SCL → GPIO8 | Bus I2C 1 (0x3C) |
+| OLED 128x32 (ECG, opcional) | SDA → GPIO7, SCL → GPIO8 | Bus I2C 1 (0x3C). Sin ella, el ECG se muestra en la OLED principal |
 | DS18B20 | Datos → GPIO4 | Resistencia de 4,7 kΩ entre datos y 3V3 |
 | AD8232 | OUTPUT → GPIO1, LO− → GPIO2, LO+ → GPIO3 | SDN al aire o a 3V3. **SDN a GND apaga el AD8232** |
 
 Todos los módulos a 3V3 y GND del mismo riel. El Wi-Fi transmite a 11 dBm (`WIFI_POTENCIA_TX`) para no provocar caídas de tensión en ese riel.
 
 ## Pantallas
+
+**Arranque.** La pantalla de chequeo muestra SpO2, Acel, Temp, ECG, Wi-Fi y MQTT. En el ECG: `NO` = el módulo AD8232 no responde, `--` = responde pero los electrodos no están conectados, `OK` = electrodos conectados (el AD8232 solo los detecta sobre la piel). **No sigue mientras algún sensor diga NO o el ECG diga `--`** (se reintenta solo: puedes conectarlos en caliente); con todo OK espera la conexión al broker hasta 25 s y muestra "Todo conectado". El botón **BOOT** de la placa sigue igual aunque falte algo.
+
+**Sesión de monitoreo** (`tesis/sesion.h`). Al encender, tras el chequeo de arranque, el equipo queda en **espera del paciente**: la pantalla "Conecte al paciente" marca cada sensor con ✓ (en el paciente), ○ (falta colocarlo) o ✗ (no instalado), y **no se envía nada al backend** (tampoco caídas: mover la placa sin paciente no es una caída). **Poner el dedo en el oxímetro (1 s) inicia el monitoreo**; desde ahí cada sensor se usa y se envía apenas se conecta (los electrodos o la sonda pueden ponerse después). La sesión termina tras 60 s sin dedo, sin electrodos y sin sonda en la piel. Si el oxímetro no está instalado, inicia con los electrodos o la sonda.
 
 **OLED principal (128x64).** Las 16 filas de arriba (amarillas en las OLED bicolor) son el encabezado:
 
@@ -123,11 +129,14 @@ Todos los módulos a 3V3 y GND del mismo riel. El Wi-Fi transmite a 11 dBm (`WIF
 | `14:05` | Hora local (NTP). `--:--`: todavía sin hora |
 | `FC ♥  ECG/PPG` | El corazón late con cada latido; `ECG` o `PPG` indica de dónde sale la FC |
 | Barra bajo SpO2 | Progreso de la medición (4 latidos) |
-| Fila inferior | Temperatura y actividad (Reposo / Movimiento). Tras una caída: `¡CAIDA DETECTADA!` parpadeando durante 30 s |
+| `MOV` | El acelerómetro detecta movimiento |
+| Fila inferior | Temperatura y su rango NEWS2 (Hipotermia, Baja, Normal, Fiebre, Fiebre alta); `midiendo` mientras se estabiliza; `Coloque la sonda` si está al aire. Tras una caída: `¡CAIDA DETECTADA!` parpadeando durante 30 s |
 
 Sin dedo ni electrodos muestra el código del dispositivo, la red y la indicación de colocar el dedo.
 
-**OLED del ECG (128x32).** Trazo en barrido como en un monitor de cabecera (~3 s en pantalla, escala automática) y la FC calculada del ECG.
+**ECG.** Trazo en barrido como en un monitor de cabecera (escala automática) y la FC calculada del ECG.
+- **Con una sola OLED:** la pantalla alterna entre los signos (10 s) y el ECG a pantalla completa (6 s, ~4 s de trazo). Solo cambia al ECG si los electrodos están puestos y nunca tapa una alerta de caída. Los tiempos están en `config.h` (`PANTALLA_SIGNOS_MS`, `PANTALLA_ECG_MS`).
+- **Con la OLED 128x32 conectada:** el ECG queda fijo en ella (~3 s de trazo) y la principal muestra solo los signos.
 
 `tesis/pruebas/vista_previa.sh` regenera `pantallas_oled.png` con el código real del firmware.
 
@@ -136,7 +145,7 @@ Sin dedo ni electrodos muestra el código del dispositivo, la red y la indicaci�
 - **PPG (FC y SpO2):** lectura del FIFO completo del MAX30102 a 100 Hz (el driver de SparkFun guardaba 4 muestras y perdía el resto); pasa-banda 0,5–5 Hz; latidos por función suma de pendientes con umbral adaptativo y refractario; FC con la mediana de los últimos RR y promedio de los cercanos a ella; SpO2 por razón de razones latido a latido con la curva de Maxim (`SPO2_A/B/C`). El dedo se detecta por salto sobre la luz ambiente y se libera tras 8 s sin pulso.
 - **ECG:** muestreo a 250 Hz exactos en una tarea propia (antes quedaban huecos cada vez que se dibujaba la pantalla); pasa-altos 0,5 Hz, notch de 60 Hz y pasa-bajos 40 Hz para el trazo; detector QRS de Pan-Tompkins con rechazo de ondas T y búsqueda hacia atrás. Si los electrodos dan un ritmo confiable, la FC enviada sale del ECG.
 - **Caídas:** ADXL345 a ±16 g (antes ±2 g, que recortaba el golpe) y 100 Hz con FIFO. Se confirma una caída con ingravidez → impacto → 2 s quieto → cambio de postura (nota AN-1023 de Analog Devices). Saltar, sentarse de golpe o acostarse no la disparan.
-- **Temperatura:** DS18B20 a 12 bits sin bloquear, mediana de 3 lecturas, descarta el valor de encendido (85 °C). Ya no se envía la temperatura interna del MAX30102 como si fuera corporal.
+- **Temperatura:** DS18B20 a 12 bits sin bloquear, mediana de 3 lecturas, descarta el valor de encendido (85 °C). El DS18B20 mide la superficie donde está: al aire marca el ambiente y en la mano ~32 °C. Por eso solo se informa con la sonda sobre la piel (≥ `TEMP_MIN_CONTACTO`, 32 °C). Para no esperar los ~5 min que tarda la sonda en llegar a la temperatura del cuerpo, usa el **método predictivo** de los termómetros clínicos electrónicos: ajusta por mínimos cuadrados la curva exponencial de calentamiento y da su valor final cuando las predicciones coinciden (en las pruebas: la mitad del tiempo, con error ≤ 0,2 °C). Después lo confirma con la medición directa (menos de 0,2 °C de variación en 60 s). Se clasifica con las bandas de NEWS2 y admite una corrección calibrada contra un termómetro clínico (`TEMP_CORRECCION_C`). Ya no se envía la temperatura interna del MAX30102 como si fuera corporal.
 
 Pruebas en el computador (sin hardware):
 
@@ -172,6 +181,7 @@ El backend ya lee este broker (`Backend/src/Vitalify.Api/Entrada/Mqtt/ReceptorMq
 | `--:--` y `↑N` creciendo | Sin NTP (la red no tiene salida a internet) | Las lecturas se guardan y se envían al tener hora |
 | "Electrodos desconectados" | LO+ o LO− en alto | Revisar electrodos y que SDN no esté a GND |
 | "Sin sonda temp." | DS18B20 sin respuesta | Revisar la resistencia de 4,7 kΩ y GPIO4 |
+| "Coloque la sonda" | La sonda está al aire o en la mano (< 32 °C) | Colocarla en la axila y esperar a que deje de decir `midiendo` |
 
 ## Limitaciones
 
