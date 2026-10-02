@@ -19,6 +19,24 @@ services:
     command: ["sh", "/iniciar.sh"]
     restart: unless-stopped
 
+  # Muestra cada JSON que publican los wearables en los Logs de este contenedor (Docker Desktop →
+  # vitalify-monitor → Logs). El log de mosquitto solo registra conexiones, nunca el contenido.
+  # Usa otro client id: no le quita la sesión al backend.
+  monitor:
+    image: eclipse-mosquitto:2
+    container_name: vitalify-monitor
+    env_file: .env
+    depends_on:
+      - mosquitto
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        sleep 3; exec mosquitto_sub -h mosquitto -i vitalify-monitor
+        -u "$$MQTT_BACKEND_USUARIO" -P "$$MQTT_BACKEND_CLAVE"
+        -t 'device/+/telemetria' -t 'device/+/estado' -F '%I  %t  %p'
+    restart: unless-stopped
+
 volumes:
   datos:
     name: vitalify-mosquitto-datos
