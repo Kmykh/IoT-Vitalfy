@@ -25,12 +25,13 @@ static VistaPrincipal base() {
   v.horaValida = true;
   v.hora = 14;
   v.minuto = 5;
-  v.sondaTemp = true;
-  v.tempValida = true;
+  v.estadoTemp = EstadoTemperatura::Estable;
   v.temp = 36.8f;
+  v.rangoTemp = RangoTemperatura::Normal;
   v.acelerometro = true;
   v.codigo = "ESP32-001";
   v.red = "MiRedCasa";
+  v.sesionActiva = true;
   v.ms = 1000;
   return v;
 }
@@ -41,12 +42,30 @@ int main() {
   VistaArranque a;
   a.version = "2.0.0";
   a.codigo = "ESP32-001";
-  a.ppg = a.acelerometro = a.oledEcg = true;
-  a.temperatura = false;
+  a.ppg = a.acelerometro = a.temperatura = a.ecgModulo = true;  // faltan los electrodos: no sigue
+  a.ms = 400;
   dibujarArranque(principal, a);
-  guardar(principal, "01_arranque");
+  guardar(principal, "01a_arranque_conectando");
+  a.electrodos = a.wifi = true;
+  a.broker = 2;
+  a.red = "MiRedCasa";
+  dibujarArranque(principal, a);
+  guardar(principal, "01b_arranque_todo_conectado");
 
+  // Sin paciente: qué falta conectar
   VistaPrincipal v = base();
+  v.sesionActiva = false;
+  v.estadoTemp = EstadoTemperatura::SinContacto;
+  v.ms = 600;
+  dibujarPrincipal(principal, v);
+  guardar(principal, "01c_conecte_paciente");
+  v.ppg = EstadoPpg::Estabilizando;
+  v.electrodos = true;
+  v.estadoTemp = EstadoTemperatura::Estabilizando;
+  dibujarPrincipal(principal, v);
+  guardar(principal, "01d_conecte_paciente_iniciando");
+
+  v = base();
   v.temp = 36.4f;
   v.red = "Hotspot del celular";  // SSID largo: se recorta detrás del código
   dibujarPrincipal(principal, v);
@@ -80,10 +99,14 @@ int main() {
   v.fc = 128;
   v.spo2 = 100;
   v.movimiento = true;
+  v.temp = 38.6f;
+  v.rangoTemp = RangoTemperatura::Fiebre;
   dibujarPrincipal(principal, v);
   guardar(principal, "05_tres_digitos");
 
   v = base();
+  v.estadoTemp = EstadoTemperatura::Estabilizando;
+  v.temp = 35.4f;
   v.ppg = EstadoPpg::SenalDebil;
   v.ms = 700;
   dibujarPrincipal(principal, v);
@@ -101,7 +124,7 @@ int main() {
   v = base();
   v.broker = 3;
   v.ms = 500;
-  v.sondaTemp = false;
+  v.estadoTemp = EstadoTemperatura::SinSonda;
   v.acelerometro = false;
   v.sensorPpg = false;
   v.red = "MQTT: usuario/clave?";
@@ -112,6 +135,7 @@ int main() {
   v = base();
   v.fc = 64;
   v.fcDelEcg = true;
+  v.estadoTemp = EstadoTemperatura::SinContacto;
   dibujarPrincipal(principal, v);
   guardar(principal, "09_solo_ecg");
 
@@ -119,7 +143,7 @@ int main() {
   ProcesadorEcg p;
   GeneradorEcg gen;
   gen.fc = 72;
-  BarridoEcg barrido;
+  BarridoEcg barrido(8, 97);  // OLED 128x32: 97 columnas de trazo y el panel de la FC
   VistaEcg ve;
   for (int i = 0; i < 250 * 6; i++) {
     bool latido = false;
@@ -131,6 +155,23 @@ int main() {
   ve.pulso = true;
   dibujarEcg(ecg, barrido, ve);
   guardar(ecg, "10_ecg");
+
+  // Una sola OLED: el ECG ocupa la pantalla principal (128 columnas, ~4 s)
+  BarridoEcg completo(8, BarridoEcg::kAnchoMax);
+  ProcesadorEcg p2;
+  GeneradorEcg gen2;
+  gen2.fc = 72;
+  for (int i = 0; i < 250 * 6; i++) {
+    bool latido = false;
+    completo.agregar(p2.procesar(gen2.muestra(), true, &latido));
+  }
+  for (int i = 0; i < 30; i++) completo.actualizarEscala();
+  VistaEcg vc;
+  vc.electrodos = true;
+  vc.fc = p2.resultado().fc;
+  vc.pulso = true;
+  dibujarEcgCompleto(principal, completo, base(), vc);
+  guardar(principal, "12_ecg_pantalla_completa");
 
   ve.electrodos = false;
   ve.ms = 700;

@@ -16,5 +16,5 @@ fi
 
 mkdir -p salida
 "$CXX" -std=c++17 -O2 -Wall -Wextra -I.. \
-  ../ppg.cpp ../ecg.cpp ../caidas.cpp ../telemetria.cpp pruebas.cpp -o salida/pruebas
+  ../ppg.cpp ../ecg.cpp ../caidas.cpp ../telemetria.cpp ../temperatura.cpp ../sesion.cpp pruebas.cpp -o salida/pruebas
 ./salida/pruebas

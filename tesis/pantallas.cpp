@@ -47,6 +47,52 @@ const char* const kCorazonVacio[] = {
     "..#.#..",
     "...#...",
 };
+const char* const kCorazonGrandeLleno[] = {
+    ".###...###.",
+    "#####.#####",
+    "###########",
+    "###########",
+    "###########",
+    ".#########.",
+    "..#######..",
+    "...#####...",
+    "....###....",
+    ".....#.....",
+};
+const char* const kCorazonGrandeVacio[] = {
+    ".###...###.",
+    "#...#.#...#",
+    "#....#....#",
+    "#.........#",
+    "#.........#",
+    ".#.......#.",
+    "..#.....#..",
+    "...#...#...",
+    "....#.#....",
+    ".....#.....",
+};
+const char* const kListo[] = {  // ✓
+    "......#",
+    ".....##",
+    "#...##.",
+    "##.##..",
+    ".###...",
+    "..#....",
+};
+const char* const kPendiente[] = {  // ○
+    ".###.",
+    "#...#",
+    "#...#",
+    "#...#",
+    ".###.",
+};
+const char* const kNoInstalado[] = {  // ✗
+    "#...#",
+    ".#.#.",
+    "..#..",
+    ".#.#.",
+    "#...#",
+};
 const char* const kNubeLlena[] = {
     "....###.....",
     "..#######...",
@@ -161,6 +207,8 @@ void barraEstado(Adafruit_GFX& g, const VistaPrincipal& v) {
     texto(g, 33, 0, p);
   }
 
+  if (v.acelerometro && v.movimiento) texto(g, 66, 0, "MOV");
+
   // Hora local (NTP)
   char hora[12];
   if (v.horaValida)
@@ -183,24 +231,29 @@ void filaInferior(Adafruit_GFX& g, const VistaPrincipal& v) {
 
   g.drawFastHLine(0, kYLineaInferior, 128, kOn);
   icono(g, 1, 53, kTermometro);
-  if (!v.sondaTemp) {
-    texto(g, 8, 53, "Sin sonda temp.");
-  } else {
-    char t[8];
-    if (v.tempValida)
-      snprintf(t, sizeof t, "%.1f", v.temp);
-    else
-      strcpy(t, "--.-");
-    g.setFont(&FreeSansBold9pt7b);
-    g.setTextColor(kOn);
-    g.setCursor(8, 62);
-    g.print(t);
-    const int x = g.getCursorX() + 1;
-    const char unidad[3] = {kGrado, 'C', 0};
-    texto(g, x, 50, unidad);
+  switch (v.estadoTemp) {
+    case EstadoTemperatura::SinSonda:
+      texto(g, 8, 53, "Sin sonda temp.");
+      return;
+    case EstadoTemperatura::SinContacto:  // al aire: el número sería la temperatura ambiente
+      texto(g, 8, 53, "Coloque la sonda");
+      return;
+    default:
+      break;
   }
-
-  if (v.acelerometro) textoDerecha(g, 127, 53, v.movimiento ? "Movimiento" : "Reposo");
+  char t[8];
+  snprintf(t, sizeof t, "%.1f", v.temp);
+  g.setFont(&FreeSansBold9pt7b);
+  g.setTextColor(kOn);
+  g.setCursor(8, 62);
+  g.print(t);
+  const int x = g.getCursorX() + 1;
+  const char unidad[3] = {kGrado, 'C', 0};
+  texto(g, x, 50, unidad);
+  if (v.estadoTemp == EstadoTemperatura::Estabilizando)
+    textoDerecha(g, 127, 53, (v.ms / 500) % 2 ? "midiendo" : "midiendo.");
+  else
+    textoDerecha(g, 127, 53, EvaluadorTemperatura::nombre(v.rangoTemp));
 }
 
 // Corazón grande con una línea de pulso calada (pantalla de espera)
@@ -233,6 +286,38 @@ void pantallaEspera(Adafruit_GFX& g, const VistaPrincipal& v) {
     texto(g, 34, 22, "Sensor SpO2");
     texto(g, 34, 32, "no detectado");
   }
+}
+
+// Sin sesión: qué sensor ya está en el paciente (✓), cuál falta colocar (○) y cuál no está instalado (✗)
+enum class Conexion : uint8_t { Lista, Pendiente, NoInstalado };
+void filaConexion(Adafruit_GFX& g, int y, const char* nombre, Conexion c, const char* falta) {
+  if (c == Conexion::Lista)
+    icono(g, 0, y, kListo);
+  else if (c == Conexion::Pendiente)
+    icono(g, 1, y + 1, kPendiente);
+  else
+    icono(g, 1, y + 1, kNoInstalado);
+  texto(g, 10, y, nombre);
+  textoDerecha(g, 127, y, c == Conexion::Lista ? "OK" : (c == Conexion::NoInstalado ? "no instalado" : falta));
+}
+
+void pantallaConexion(Adafruit_GFX& g, const VistaPrincipal& v) {
+  textoCentrado(g, 64, kYEtiquetas, "Conecte al paciente");
+  const bool dedo = v.ppg != EstadoPpg::SinDedo;
+  filaConexion(g, 19, "SpO2", !v.sensorPpg ? Conexion::NoInstalado : (dedo ? Conexion::Lista : Conexion::Pendiente),
+               "coloque el dedo");
+  filaConexion(g, 29, "ECG",
+               !v.ecgInstalado ? Conexion::NoInstalado : (v.electrodos ? Conexion::Lista : Conexion::Pendiente),
+               "conecte cables");
+  const Conexion temp = v.estadoTemp == EstadoTemperatura::SinSonda      ? Conexion::NoInstalado
+                        : v.estadoTemp == EstadoTemperatura::SinContacto ? Conexion::Pendiente
+                                                                          : Conexion::Lista;
+  filaConexion(g, 39, "Temp", temp, "coloque sonda");
+  g.drawFastHLine(0, 49, 128, kOn);
+  if (dedo)
+    textoCentrado(g, 64, 53, "Iniciando monitoreo");
+  else if ((v.ms / 600) % 2)
+    textoCentrado(g, 64, 53, v.sensorPpg ? "Ponga el dedo: inicia" : "Inicia con ECG o temp");
 }
 
 void pantallaSignos(Adafruit_GFX& g, const VistaPrincipal& v) {
@@ -280,6 +365,10 @@ void dibujarPrincipal(Adafruit_GFX& g, const VistaPrincipal& v) {
   g.cp437(true);
   g.setTextWrap(false);
   barraEstado(g, v);
+  if (!v.sesionActiva) {  // sin paciente: lista de qué falta conectar
+    pantallaConexion(g, v);
+    return;
+  }
   if (v.ppg != EstadoPpg::SinDedo || v.fc > 0)
     pantallaSignos(g, v);
   else
@@ -302,28 +391,52 @@ void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v) {
 
   char linea[24];
   snprintf(linea, sizeof linea, "%s  v%s", v.codigo, v.version);
-  textoCentrado(g, 64, 18, linea);
-  g.drawFastHLine(0, 28, 128, kOn);
+  textoCentrado(g, 64, 17, linea);
+  g.drawFastHLine(0, 26, 128, kOn);
+
+  // "..." animado mientras se conecta
+  static const char* const kPuntos[] = {".", "..", "..."};
+  const char* puntos = kPuntos[(v.ms / 350) % 3];
+  const char* broker = v.broker == 2 ? "OK" : (v.broker == 3 ? "CLAVE" : (v.wifi ? puntos : "--"));
   const struct {
     const char* nombre;
-    bool ok;
+    const char* estado;
     int x, y;
-  } items[] = {{"SpO2", v.ppg, 4, 32}, {"Acel", v.acelerometro, 70, 32},
-               {"Temp", v.temperatura, 4, 43}, {"OLED2", v.oledEcg, 70, 43}};
+  } items[] = {{"SpO2", v.ppg ? "OK" : "NO", 2, 29},           {"Acel", v.acelerometro ? "OK" : "NO", 68, 29},
+               {"Temp", v.temperatura ? "OK" : "NO", 2, 38},   {"ECG", !v.ecgModulo ? "NO" : (v.electrodos ? "OK" : "--"), 68, 38},
+               {"WiFi", v.wifi ? "OK" : puntos, 2, 47},        {"MQTT", broker, 68, 47}};
   for (const auto& it : items) {
     texto(g, it.x, it.y, it.nombre);
-    textoDerecha(g, it.x + 54, it.y, it.ok ? "OK" : "NO");
+    textoDerecha(g, it.x + 57, it.y, it.estado);
   }
-  textoCentrado(g, 64, 56, "UPC - IoMT");
+  g.drawFastHLine(0, 55, 128, kOn);
+  char pie[22];
+  const bool faltaSensor = !v.ppg || !v.acelerometro || !v.temperatura || !v.ecgModulo;
+  if (faltaSensor || !v.electrodos)  // no sigue hasta que esté todo (o se pulse BOOT)
+    snprintf(pie, sizeof pie, "%s",
+             (v.ms / 1500) % 2 ? "BOOT = seguir igual" : (faltaSensor ? "Revise los NO" : "Conecte electrodos"));
+  else if (v.broker == 2)
+    snprintf(pie, sizeof pie, "Todo conectado");
+  else if (v.red[0])
+    snprintf(pie, sizeof pie, "%s", v.red);
+  else
+    snprintf(pie, sizeof pie, "Buscando Wi-Fi%s", puntos);
+  textoCentrado(g, 64, 57, pie);
 }
 
 // ---------- ECG ----------
-BarridoEcg::BarridoEcg(int muestrasPorColumna) : porColumna_(muestrasPorColumna < 1 ? 1 : muestrasPorColumna) {
+BarridoEcg::BarridoEcg(int muestrasPorColumna, int ancho)
+    : porColumna_(muestrasPorColumna < 1 ? 1 : muestrasPorColumna), ancho_(kAnchoMax) {
+  fijarAncho(ancho);
+}
+
+void BarridoEcg::fijarAncho(int ancho) {
+  ancho_ = ancho < kHueco + 1 ? kHueco + 1 : (ancho > kAnchoMax ? kAnchoMax : ancho);
   limpiar();
 }
 
 void BarridoEcg::limpiar() {
-  for (int x = 0; x < kAncho; x++) {
+  for (int x = 0; x < kAnchoMax; x++) {
     valida_[x] = false;
     min_[x] = max_[x] = primero_[x] = ultimo_[x] = 0;
   }
@@ -346,14 +459,14 @@ void BarridoEcg::agregar(float v) {
   primero_[cursor_] = accPrimero_;
   ultimo_[cursor_] = accUltimo_;
   valida_[cursor_] = true;
-  cursor_ = (cursor_ + 1) % kAncho;
-  for (int k = 0; k < kHueco; k++) valida_[(cursor_ + k) % kAncho] = false;
+  cursor_ = (cursor_ + 1) % ancho_;
+  for (int k = 0; k < kHueco; k++) valida_[(cursor_ + k) % ancho_] = false;
 }
 
 void BarridoEcg::actualizarEscala() {
   float vmin = 0, vmax = 0;
   bool hay = false;
-  for (int x = 0; x < kAncho; x++) {
+  for (int x = 0; x < ancho_; x++) {
     if (!valida_[x]) continue;
     if (!hay || min_[x] < vmin) vmin = min_[x];
     if (!hay || max_[x] > vmax) vmax = max_[x];
@@ -369,11 +482,30 @@ void BarridoEcg::actualizarEscala() {
   centro_ += ((vmax + vmin) * 0.5f - centro_) * 0.2f;
 }
 
+namespace {
+// Trazo del barrido en la franja [y0, y0 + alto): la escala sigue a la amplitud real de la onda
+void dibujarTrazo(Adafruit_GFX& g, BarridoEcg& b, int y0, int alto) {
+  b.actualizarEscala();
+  const float centro = b.centro(), rango = b.rango();
+  const float medio = y0 + (alto - 1) / 2.0f, escala = (alto - 2) / rango;
+  const auto aY = [&](float valor) {
+    const int y = (int)lroundf(medio - (valor - centro) * escala);
+    return y < y0 ? y0 : (y > y0 + alto - 1 ? y0 + alto - 1 : y);
+  };
+  for (int x = 0; x < b.ancho(); x++) {
+    if (!b.valida(x)) continue;
+    const int arriba = aY(b.maximo(x)), abajo = aY(b.minimo(x));
+    g.drawFastVLine(x, arriba, abajo - arriba + 1, kOn);
+    if (x > 0 && b.valida(x - 1)) g.drawLine(x - 1, aY(b.ultimo(x - 1)), x, aY(b.primero(x)), kOn);
+  }
+}
+}  // namespace
+
 void dibujarEcg(Adafruit_GFX& g, BarridoEcg& b, const VistaEcg& v) {
   g.fillScreen(kOff);
   g.cp437(true);
   g.setTextWrap(false);
-  const int panel = BarridoEcg::kAncho + 1;  // x del separador
+  const int panel = b.ancho() + 1;  // x del separador
   lineaPunteada(g, panel, 0, 31);
 
   // Panel derecho: FC del ECG
@@ -388,26 +520,40 @@ void dibujarEcg(Adafruit_GFX& g, BarridoEcg& b, const VistaEcg& v) {
   textoCentrado(g, panel + 15, 25, "lpm");
 
   if (!v.electrodos) {
-    const int cx = BarridoEcg::kAncho / 2;
+    const int cx = b.ancho() / 2;
     if ((v.ms / 700) % 2) {
       textoCentrado(g, cx, 7, "Electrodos");
       textoCentrado(g, cx, 17, "desconectados");
     }
-    g.drawFastHLine(0, 30, BarridoEcg::kAncho, kOn);
+    g.drawFastHLine(0, 30, b.ancho(), kOn);
     return;
   }
+  dibujarTrazo(g, b, 0, 32);
+}
 
-  // Trazo: la escala sigue a la amplitud real de la onda y usa toda la altura
-  b.actualizarEscala();
-  const float centro = b.centro(), rango = b.rango();
-  const auto aY = [centro, rango](float valor) {
-    const int y = (int)lroundf(15.5f - (valor - centro) / rango * 30.0f);
-    return y < 0 ? 0 : (y > 31 ? 31 : y);
-  };
-  for (int x = 0; x < BarridoEcg::kAncho; x++) {
-    if (!b.valida(x)) continue;
-    const int arriba = aY(b.maximo(x)), abajo = aY(b.minimo(x));
-    g.drawFastVLine(x, arriba, abajo - arriba + 1, kOn);
-    if (x > 0 && b.valida(x - 1)) g.drawLine(x - 1, aY(b.ultimo(x - 1)), x, aY(b.primero(x)), kOn);
+void dibujarEcgCompleto(Adafruit_GFX& g, BarridoEcg& b, const VistaPrincipal& p, const VistaEcg& v) {
+  g.fillScreen(kOff);
+  g.cp437(true);
+  g.setTextWrap(false);
+  barraEstado(g, p);
+
+  // Encabezado: ECG, corazón que late con cada QRS y la FC calculada de los QRS
+  texto(g, 2, kYEtiquetas, "ECG");
+  char s[16];
+  if (v.electrodos && v.fc > 0)
+    snprintf(s, sizeof s, "%d lpm", v.fc);
+  else
+    strcpy(s, "-- lpm");
+  textoDerecha(g, 127, kYEtiquetas, s);
+  icono(g, 127 - anchoTexto(s) - 15, 7, v.pulso ? kCorazonGrandeLleno : kCorazonGrandeVacio);
+
+  if (!v.electrodos) {
+    if ((v.ms / 700) % 2) {
+      textoCentrado(g, 64, 28, "Electrodos");
+      textoCentrado(g, 64, 38, "desconectados");
+    }
+    g.drawFastHLine(0, 60, 128, kOn);
+    return;
   }
+  dibujarTrazo(g, b, 17, 47);
 }

@@ -11,6 +11,8 @@
 #include "ppg.h"
 #include "senales.h"
 #include "telemetria.h"
+#include "sesion.h"
+#include "temperatura.h"
 
 static int fallas = 0, total = 0;
 
@@ -211,6 +213,24 @@ static void pruebasEcg() {
     VERIFICAR(fabs(r.fc - 75) <= 2, "no recuperó la FC tras reconectar (fc %d)", r.fc);
   }
   {
+    // Electrodos que se mueven: la señal toca el riel del ADC. Esos saltos no deben contarse como QRS
+    ProcesadorEcg p;
+    GeneradorEcg g;
+    correrEcg(p, g, 10);
+    int falsos = 0;
+    for (int i = 0; i < 250 * 4; i++) {  // 4 s de artefactos: cada 0,3 s salta al riel y vuelve
+      const int crudo = (i % 75) < 8 ? ((i / 75) % 2 ? 4095 : 0) : g.muestra();
+      bool latido = false;
+      p.procesar(crudo, true, &latido);
+      if (latido) falsos++;
+      if (i % 75 == 74) VERIFICAR(p.resultado().fc == -1, "dio FC %d durante los artefactos", p.resultado().fc);
+    }
+    ResultadoEcg r = correrEcg(p, g, 8);
+    printf("  artefactos de riel -> QRS falsos %d, FC al pasar %d\n", falsos, r.fc);
+    VERIFICAR(falsos == 0, "contó %d artefactos como QRS", falsos);
+    VERIFICAR(fabs(r.fc - 75) <= 2, "no recuperó la FC tras los artefactos (fc %d)", r.fc);
+  }
+  {
     // El notch quita 60 Hz y deja pasar el QRS (10 Hz)
     ProcesadorEcg p;
     double max60 = 0, max10 = 0;
@@ -408,7 +428,135 @@ static void pruebasTelemetria() {
   VERIFICAR(sinNtp.frente().epochMs == 1790777110250LL - 5000, "la hora de una lectura cambió al reenviarla");
 }
 
+// Sonda DS18B20 simulada: exponencial hacia el equilibrio, ruido, 12 bits (0,0625 °C) y mediana
+// de 3 como en sensores.cpp. Devuelve los segundos hasta "Estable" (0 si nunca) y el valor informado.
+struct ResultadoSonda {
+  float segundos = 0, valor = 0;
+  bool predicha = false;
+  int parpadeos = 0;  // vuelve a "midiendo" después de haber dado un resultado
+};
+static ResultadoSonda simularSonda(float equilibrio, float tau, float duracion, uint64_t semilla = 5) {
+  EvaluadorTemperatura t;
+  Aleatorio rnd(semilla);
+  ResultadoSonda r;
+  float ultimas[3] = {24.5f, 24.5f, 24.5f};
+  bool estable = false;
+  for (float seg = 0; seg < duracion; seg += 1.8f) {
+    const float real = equilibrio - (equilibrio - 24.5f) * expf(-seg / tau);
+    const float leida = roundf((real + 0.02f * (float)rnd.normal()) / 0.0625f) * 0.0625f;
+    ultimas[0] = ultimas[1];
+    ultimas[1] = ultimas[2];
+    ultimas[2] = leida;
+    float a = ultimas[0], b = ultimas[1], c = ultimas[2];  // mediana de 3
+    const float mediana = a > b ? (b > c ? b : (a > c ? c : a)) : (a > c ? a : (b > c ? c : b));
+    t.agregar(mediana, (uint32_t)(seg * 1000));
+    if (t.estado() == EstadoTemperatura::Estable && !estable) {
+      estable = true;
+      r.segundos = seg;
+      r.valor = t.valor();
+      r.predicha = t.predicha();
+    } else if (estable && t.estado() != EstadoTemperatura::Estable) {
+      r.parpadeos++;
+      estable = false;
+    }
+  }
+  return r;
+}
+
+static void pruebasTemperatura() {
+  printf("Temperatura (DS18B20)\n");
+  EvaluadorTemperatura t;
+  uint32_t ms = 0;
+  for (int i = 0; i < 20; i++, ms += 1800) t.agregar(24.5f, ms);  // al aire
+  VERIFICAR(t.estado() == EstadoTemperatura::SinContacto, "al aire no debe informarse");
+
+  // Sonda en la axila: con la predicción el resultado sale mucho antes de que la sonda llegue
+  for (float tau : {30.0f, 60.0f, 90.0f}) {
+    float peorError = 0, peorTiempo = 0, sinPrediccion = 0;
+    int parpadeos = 0;
+    for (uint64_t semilla = 1; semilla <= 6; semilla++) {  // varias secuencias de ruido
+      const ResultadoSonda r = simularSonda(36.7f, tau, 500, semilla);
+      VERIFICAR(r.segundos > 0, "nunca dio resultado (tau %.0f)", tau);
+      if (fabsf(r.valor - 36.7f) > peorError) peorError = fabsf(r.valor - 36.7f);
+      if (r.segundos > peorTiempo) peorTiempo = r.segundos;
+      if (!r.predicha) sinPrediccion++;
+      parpadeos += r.parpadeos;
+    }
+    const float antes = tau * logf(12.2f / 0.1f);  // lo que tardaba esperando a la sonda (a 0,1 °C)
+    printf("  axila, tau %3.0f s: peor error %.1f C, peor tiempo %3.0f s (sin predicción ~%3.0f s), "
+           "medidas sin predecir %.0f/6\n", tau, peorError, peorTiempo, antes, sinPrediccion);
+    VERIFICAR(peorError <= 0.25f, "error %.2f C con tau %.0f", peorError, tau);
+    VERIFICAR(peorTiempo < antes, "la predicción no adelantó el resultado (tau %.0f)", tau);
+    VERIFICAR(parpadeos == 0, "%d parpadeos a 'midiendo'", parpadeos);
+  }
+  {
+    const ResultadoSonda r = simularSonda(38.6f, 60, 400, 9);  // paciente con fiebre
+    printf("  fiebre: %.1f C a los %.0f s -> %s\n", r.valor, r.segundos,
+           EvaluadorTemperatura::nombre(EvaluadorTemperatura::clasificar(r.valor)));
+    VERIFICAR(EvaluadorTemperatura::clasificar(r.valor) == RangoTemperatura::Fiebre, "fiebre: %.1f", r.valor);
+  }
+  {
+    EvaluadorTemperatura e;  // sonda ya caliente (estaba en la axila): plana con ruido
+    Aleatorio rnd(3);
+    uint32_t m = 0;
+    for (; m < 120000 && e.estado() != EstadoTemperatura::Estable; m += 1800)
+      e.agregar(36.5f + 0.03f * (float)rnd.normal(), m);
+    printf("  sonda ya en equilibrio: %.1f C a los %u s\n", e.valor(), (unsigned)(m / 1000));
+    VERIFICAR(e.estado() == EstadoTemperatura::Estable && fabsf(e.valor() - 36.5f) <= 0.1f, "plana: %.1f", e.valor());
+    e.agregar(25.0f, m);  // se retira
+    VERIFICAR(e.estado() == EstadoTemperatura::SinContacto, "no detectó que se retiró la sonda");
+    e.sinSonda();
+    VERIFICAR(e.estado() == EstadoTemperatura::SinSonda, "sinSonda()");
+  }
+
+  ParametrosTemperatura conCorreccion;  // calibrada contra un termómetro clínico
+  conCorreccion.correccion = 0.4f;
+  EvaluadorTemperatura c(conCorreccion);
+  c.agregar(36.2f, 0);
+  VERIFICAR(fabsf(c.valor() - 36.6f) < 0.01f, "corrección: %.2f", c.valor());
+
+  // Bandas de NEWS2
+  VERIFICAR(EvaluadorTemperatura::clasificar(35.0f) == RangoTemperatura::Hipotermia, "35,0");
+  VERIFICAR(EvaluadorTemperatura::clasificar(35.1f) == RangoTemperatura::Baja, "35,1");
+  VERIFICAR(EvaluadorTemperatura::clasificar(36.04f) == RangoTemperatura::Baja, "36,04 redondea a 36,0");
+  VERIFICAR(EvaluadorTemperatura::clasificar(36.1f) == RangoTemperatura::Normal, "36,1");
+  VERIFICAR(EvaluadorTemperatura::clasificar(38.0f) == RangoTemperatura::Normal, "38,0");
+  VERIFICAR(EvaluadorTemperatura::clasificar(38.1f) == RangoTemperatura::Fiebre, "38,1");
+  VERIFICAR(EvaluadorTemperatura::clasificar(39.1f) == RangoTemperatura::FiebreAlta, "39,1");
+}
+
+static void pruebasSesion() {
+  printf("Sesión de monitoreo\n");
+  SesionPaciente s;
+  SenalesPaciente nada, dedo, soloEcg;
+  dedo.dedo = true;
+  soloEcg.electrodos = true;
+  uint32_t ms = 0;
+  for (; ms < 10000; ms += 100) s.actualizar(soloEcg, ms);
+  VERIFICAR(!s.monitoreando(), "inició sin el dedo (solo electrodos)");
+  bool cambio = false;
+  for (int i = 0; i < 5; i++, ms += 100) cambio |= s.actualizar(dedo, ms);
+  VERIFICAR(!s.monitoreando() && !cambio, "inició con un toque de 0,5 s");
+  for (int i = 0; i < 10; i++, ms += 100) cambio |= s.actualizar(dedo, ms);
+  VERIFICAR(s.monitoreando() && cambio, "no inició con el dedo sostenido");
+  for (int i = 0; i < 300; i++, ms += 100) s.actualizar(nada, ms);  // retira todo 30 s
+  VERIFICAR(s.monitoreando(), "cortó la sesión antes de 60 s");
+  for (int i = 0; i < 300; i++, ms += 100) s.actualizar(soloEcg, ms);  // sigue con electrodos
+  VERIFICAR(s.monitoreando(), "cortó la sesión con electrodos puestos");
+  for (int i = 0; i < 610; i++, ms += 100) s.actualizar(nada, ms);
+  VERIFICAR(!s.monitoreando(), "no terminó tras 60 s sin paciente");
+
+  SesionPaciente sinOximetro;  // MAX30102 no instalado: inicia con los electrodos
+  SenalesPaciente ecgSinPpg;
+  ecgSinPpg.sensorPpg = false;
+  ecgSinPpg.electrodos = true;
+  for (uint32_t t = 0; t < 1500; t += 100) sinOximetro.actualizar(ecgSinPpg, t);
+  VERIFICAR(sinOximetro.monitoreando(), "sin oxímetro no inició con los electrodos");
+}
+
 int main() {
+  pruebasSesion();
+  pruebasTemperatura();
   pruebasPpg();
   pruebasEcg();
   pruebasCaidas();

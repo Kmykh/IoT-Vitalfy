@@ -19,6 +19,6 @@ GFX=../../libraries/Adafruit_GFX_Library
 mkdir -p salida
 rm -f salida/*.pbm
 "$CXX" -std=c++17 -O1 -DARDUINO=100 -Istubs -I"$GFX" -I.. \
-  ../pantallas.cpp ../ecg.cpp ../ppg.cpp "$GFX/Adafruit_GFX.cpp" vista_previa.cpp -o salida/vista_previa
+  ../pantallas.cpp ../ecg.cpp ../ppg.cpp ../temperatura.cpp "$GFX/Adafruit_GFX.cpp" vista_previa.cpp -o salida/vista_previa
 ./salida/vista_previa
 python3 vista_previa.py

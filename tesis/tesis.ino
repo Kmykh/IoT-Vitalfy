@@ -22,7 +22,9 @@
 #include "ppg.h"
 #include "red.h"
 #include "sensores.h"
+#include "sesion.h"
 #include "telemetria.h"
+#include "temperatura.h"
 
 // El último parámetro deja el bus en 400 kHz después de dibujar (la librería lo bajaba a 100 kHz
 // y hacía más lentas las lecturas del MAX30102 y del ADXL345, que comparten el bus 0).
@@ -45,7 +47,16 @@ ParametrosEcg parametrosEcg() {
   return p;
 }
 
+ParametrosTemperatura parametrosTemperatura() {
+  ParametrosTemperatura p;
+  p.minimoContacto = TEMP_MIN_CONTACTO;
+  p.correccion = TEMP_CORRECCION_C;
+  return p;
+}
+
 ProcesadorPpg ppg(parametrosPpg());
+EvaluadorTemperatura temperatura(parametrosTemperatura());
+SesionPaciente sesion;
 ProcesadorEcg ecg(parametrosEcg());
 DetectorCaidas caidas;
 BarridoEcg barrido;
@@ -57,44 +68,44 @@ bool caidaPorEnviar = false, trazarEcg = false;
 uint32_t seq = 0;
 int64_t ultimaMedicionUs = 0;
 
-// FC: la del ECG si los electrodos dan un ritmo confiable; si no, la del oxímetro
+// FC: la del ECG es más precisa, pero los electrodos se mueven y meten artefactos. Si hay dedo en
+// el oxímetro y las dos discrepan más del 10 %, se confía en el oxímetro.
 int fcActual(bool* delEcg) {
-  *delEcg = ecg.resultado().fc > 0;
-  return *delEcg ? ecg.resultado().fc : ppg.resultado().fc;
+  const int e = ecg.resultado().fc, p = ppg.resultado().fc;
+  const int tolerancia = p / 10 > 5 ? p / 10 : 5;
+  *delEcg = e > 0 && (p <= 0 || abs(e - p) <= tolerancia);
+  return *delEcg ? e : p;
 }
 
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);  // con el monitor cerrado, imprimir nunca bloquea el loop
+  pinMode(PIN_BOTON, INPUT_PULLUP);
   Serial.printf("\n=== Vitalify %s | %s ===\n", FIRMWARE_VERSION, CODIGO_DISPOSITIVO);
 
+  i2cLiberarBus(PIN_I2C_SDA, PIN_I2C_SCL);  // por si un reset dejó una transmisión a medias
+  i2cLiberarBus(PIN_I2C2_SDA, PIN_I2C2_SCL);
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);
   Wire1.begin(PIN_I2C2_SDA, PIN_I2C2_SCL, 400000);
   // periphBegin = false: los buses ya están iniciados con sus pines
   oledOk = i2cPresente(Wire, 0x3C) && oled.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
   oledEcgOk = i2cPresente(Wire1, 0x3C) && oledEcg.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
-  ppgOk = ppgIniciar(Wire, PPG_CORRIENTE_LED);
+  ppgOk = ppgIniciar(Wire, PPG_CORRIENTE_LED, PPG_RANGO_ADC);
   acelOk = acelIniciar(Wire);
   tempIniciar(PIN_DS18B20);
   tempActualizar(millis());
   ecgIniciar(PIN_ECG_SALIDA, PIN_ECG_LO_MAS, PIN_ECG_LO_MENOS);
   redIniciar();  // empieza a conectarse mientras se muestra el chequeo de arranque
 
+  char dispositivos[64];
+  i2cEscanear(Wire, dispositivos, sizeof dispositivos);
+  Serial.printf("I2C bus 0 (SDA=%d, SCL=%d): %s\n", PIN_I2C_SDA, PIN_I2C_SCL, dispositivos);
+  i2cEscanear(Wire1, dispositivos, sizeof dispositivos);
+  Serial.printf("I2C bus 1 (SDA=%d, SCL=%d): %s\n", PIN_I2C2_SDA, PIN_I2C2_SCL, dispositivos);
   Serial.printf("OLED %s | OLED ECG %s | MAX30102 %s | ADXL345 %s | DS18B20 %s\n", oledOk ? "OK" : "FALTA",
                 oledEcgOk ? "OK" : "FALTA", ppgOk ? "OK" : "FALTA", acelOk ? "OK" : "FALTA",
                 tempPresente() ? "OK" : "FALTA");
-  if (oledOk) {
-    VistaArranque a;
-    a.version = FIRMWARE_VERSION;
-    a.codigo = CODIGO_DISPOSITIVO;
-    a.ppg = ppgOk;
-    a.acelerometro = acelOk;
-    a.temperatura = tempPresente();
-    a.oledEcg = oledEcgOk;
-    dibujarArranque(oled, a);
-    oled.display();
-  }
-  delay(1500);
+  barrido.fijarAncho(oledEcgOk ? 97 : BarridoEcg::kAnchoMax);  // sin OLED del ECG: pantalla completa
   tDatosPpg = tDatosAcel = millis();
   enableLoopWDT();  // si el loop se colgara más de 5 s, el ESP32 se reinicia solo
 }
@@ -120,7 +131,8 @@ void atenderAcelerometro(uint32_t ahora) {
   float ax[32], ay[32], az[32];
   const int n = acelLeer(ax, ay, az, 32);
   for (int i = 0; i < n; i++) {
-    if (caidas.procesar(ax[i], ay[i], az[i])) {
+    // Sin paciente no hay caídas: mover o levantar la placa no debe generar alertas
+    if (caidas.procesar(ax[i], ay[i], az[i]) && sesion.monitoreando()) {
       msCaida = ahora;
       caidaPorEnviar = true;
       Serial.println("*** CAIDA DETECTADA: se envia al backend de inmediato ***");
@@ -143,7 +155,7 @@ void atenderEcg(uint32_t ahora) {
       const float v = ecg.procesar(m[i].adc, m[i].conectados, &latido);
       if (latido) msLatidoEcg = ahora;
       if (m[i].conectados) barrido.agregar(v);
-      if (trazarEcg) Serial.printf("ecg:%.0f\n", v);
+      if (trazarEcg) Serial.printf("ecg:%.0f crudo:%u\n", v, m[i].adc);
     }
   }
   static bool conectadosAntes = false;
@@ -155,11 +167,39 @@ void atenderEcg(uint32_t ahora) {
   }
 }
 
+void atenderTemperatura(uint32_t ahora) {
+  static uint32_t lecturas = 0;
+  tempActualizar(ahora);
+  if (!tempPresente()) {
+    temperatura.sinSonda();
+  } else if (tempLecturas() != lecturas) {
+    lecturas = tempLecturas();
+    temperatura.agregar(tempCelsius(), ahora);
+  }
+}
+
+// El dedo en el oxímetro inicia la sesión; termina tras 60 s sin ninguna señal del paciente
+void atenderSesion(uint32_t ahora) {
+  SenalesPaciente s;
+  s.sensorPpg = ppgOk;
+  s.dedo = ppg.hayDedo();
+  s.electrodos = ecg.resultado().electrodos;
+  s.sondaEnPiel = temperatura.estado() == EstadoTemperatura::Estabilizando ||
+                  temperatura.estado() == EstadoTemperatura::Estable;
+  if (!sesion.actualizar(s, ahora)) return;
+  if (sesion.monitoreando()) {
+    Serial.println("Sesion iniciada: el wearable esta en el paciente (se empieza a enviar)");
+  } else {
+    msCaida = 0;
+    Serial.println("Sesion terminada: 60 s sin dedo, electrodos ni sonda (se deja de enviar)");
+  }
+}
+
 // Sensores que no respondieron (cable flojo, conectado en caliente): reintento cada 5 s
 void reintentarSensores(uint32_t ahora) {
   if (ahora - tReintento < 5000) return;
   tReintento = ahora;
-  if (!ppgOk && (ppgOk = ppgIniciar(Wire, PPG_CORRIENTE_LED))) {
+  if (!ppgOk && (ppgOk = ppgIniciar(Wire, PPG_CORRIENTE_LED, PPG_RANGO_ADC))) {
     tDatosPpg = ahora;
     Serial.println("MAX30102 conectado");
   }
@@ -167,13 +207,22 @@ void reintentarSensores(uint32_t ahora) {
     tDatosAcel = ahora;
     Serial.println("ADXL345 conectado");
   }
-  if (!oledOk && i2cPresente(Wire, 0x3C)) oledOk = oled.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
-  if (!oledEcgOk && i2cPresente(Wire1, 0x3C)) oledEcgOk = oledEcg.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
+  if (!oledOk && i2cPresente(Wire, 0x3C) && (oledOk = oled.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false)))
+    Serial.println("OLED principal conectada");
+  if (!oledEcgOk && i2cPresente(Wire1, 0x3C) && (oledEcgOk = oledEcg.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false))) {
+    barrido.fijarAncho(97);
+    Serial.println("OLED del ECG conectada");
+  }
 }
 
 // Una lectura cada INTERVALO_TELEMETRIA_MS y otra en el instante en que se confirma una caída
 void emitirTelemetria(uint32_t ahora) {
   static uint32_t proxima = INTERVALO_TELEMETRIA_MS;
+  if (!sesion.monitoreando()) {  // sin paciente no se envía nada
+    caidaPorEnviar = false;
+    proxima = ahora + INTERVALO_TELEMETRIA_MS;
+    return;
+  }
   const bool toca = (int32_t)(ahora - proxima) >= 0;
   if (!toca && !caidaPorEnviar) return;
   if (toca) proxima = ahora + INTERVALO_TELEMETRIA_MS;
@@ -185,7 +234,8 @@ void emitirTelemetria(uint32_t ahora) {
   const int fc = fcActual(&delEcg);
   if (fc > 0) l.fc = (int16_t)fc;
   if (ppg.resultado().spo2 > 0) l.spo2 = (int16_t)ppg.resultado().spo2;
-  if (tempValida()) l.tempDecimas = (int16_t)lroundf(tempCelsius() * 10.0f);
+  // Solo una temperatura del cuerpo: con la sonda sobre la piel y ya estable
+  if (temperatura.estado() == EstadoTemperatura::Estable) l.tempDecimas = (int16_t)lroundf(temperatura.valor() * 10.0f);
   l.caida = caidaPorEnviar;
   caidaPorEnviar = false;
   if (!l.tieneDatos()) return;  // sin paciente conectado no hay nada que enviar
@@ -202,64 +252,169 @@ int8_t barrasWifi(const EstadoRed& r) {
   return r.rssi >= -85 ? 1 : 0;
 }
 
+VistaEcg vistaEcg(uint32_t ahora) {
+  VistaEcg v;
+  v.electrodos = ecg.resultado().electrodos;
+  v.fc = ecg.resultado().fc;
+  v.pulso = ahora - msLatidoEcg < 150;
+  v.ms = ahora;
+  return v;
+}
+
+// red debe seguir viva mientras se use la vista (v.red apunta a su texto)
+VistaPrincipal vistaPrincipal(uint32_t ahora, const EstadoRed& red) {
+  const ResultadoPpg& p = ppg.resultado();
+  VistaPrincipal v;
+  v.wifiBarras = barrasWifi(red);
+  switch (red.broker) {
+    case EstadoBroker::Conectado:
+      v.broker = 2;
+      break;
+    case EstadoBroker::Conectando:
+      v.broker = 1;
+      break;
+    case EstadoBroker::Rechazado:
+      v.broker = 3;
+      break;
+    default:
+      v.broker = 0;
+  }
+  v.pendientes = red.pendientes;
+  const time_t t = time(nullptr);
+  struct tm local;
+  if (red.horaSincronizada && localtime_r(&t, &local)) {
+    v.horaValida = true;
+    v.hora = (uint8_t)local.tm_hour;
+    v.minuto = (uint8_t)local.tm_min;
+  }
+  v.sensorPpg = ppgOk;
+  v.ppg = p.estado;
+  v.progreso = p.progreso;
+  v.fc = fcActual(&v.fcDelEcg);
+  v.spo2 = p.spo2;
+  v.pulso = ahora - (v.fcDelEcg ? msLatidoEcg : msLatidoPpg) < 150;
+  v.estadoTemp = temperatura.estado();
+  v.temp = temperatura.valor();
+  v.rangoTemp = temperatura.rango();
+  v.ecgInstalado = ecgModuloPresente();
+  v.electrodos = ecg.resultado().electrodos;
+  v.sesionActiva = sesion.monitoreando();
+  v.acelerometro = acelOk;
+  v.movimiento = caidas.actividad() == Actividad::Movimiento;
+  v.alertaCaida = msCaida != 0 && ahora - msCaida < 30000;
+  v.codigo = CODIGO_DISPOSITIVO;
+  v.avisoRed = red.aviso[0] != 0;
+  v.red = v.avisoRed ? red.aviso : (red.wifi == EstadoWifi::Conectado ? red.ssid : "buscando");
+  v.ms = ahora;
+  return v;
+}
+
+// Listo para seguir: los cuatro sensores responden y los electrodos del ECG están conectados
+bool sensoresListos() {
+  return ppgOk && acelOk && tempPresente() && ecgModuloPresente() && ecg.resultado().electrodos;
+}
+
+// Arranque: el chequeo no sigue mientras falte un sensor (se puede conectar en caliente: se reintenta
+// solo) y espera la conexión al broker hasta 25 s; con todo listo deja 2,5 s "Todo conectado".
+// El botón BOOT sigue igual aunque falte algo. Mientras tanto, los sensores ya miden.
+bool enArranque(uint32_t ahora, const EstadoRed& red) {
+  static bool terminado = false;
+  static uint32_t listoDesde = 0;
+  if (terminado) return false;
+  if (digitalRead(PIN_BOTON) == LOW) {
+    terminado = true;
+    Serial.println("Arranque: se sigue con el boton BOOT aunque falte algun sensor");
+    return false;
+  }
+  const bool redLista = red.broker == EstadoBroker::Conectado || ahora >= 25000;
+  static uint32_t tAviso = 0;
+  if (!sensoresListos() && ahora - tAviso >= 5000) {
+    tAviso = ahora;
+    Serial.printf("Arranque: esperando%s%s%s%s%s (BOOT = seguir igual)\n", ppgOk ? "" : " MAX30102",
+                  acelOk ? "" : " ADXL345", tempPresente() ? "" : " DS18B20",
+                  ecgModuloPresente() ? "" : " modulo AD8232",
+                  ecgModuloPresente() && !ecg.resultado().electrodos ? " electrodos del ECG" : "");
+  }
+  if (sensoresListos() && redLista) {
+    if (!listoDesde) listoDesde = ahora;
+  } else {
+    listoDesde = 0;
+  }
+  terminado = listoDesde && ahora - listoDesde >= 2500;
+  if (terminado) Serial.println("Arranque completo: sensores y electrodos conectados");
+  return !terminado;
+}
+
+void dibujarPantallaArranque(uint32_t ahora, const EstadoRed& red) {
+  VistaArranque a;
+  a.version = FIRMWARE_VERSION;
+  a.codigo = CODIGO_DISPOSITIVO;
+  a.ppg = ppgOk;
+  a.acelerometro = acelOk;
+  a.temperatura = tempPresente();
+  a.ecgModulo = ecgModuloPresente();
+  a.electrodos = ecg.resultado().electrodos;
+  a.wifi = red.wifi == EstadoWifi::Conectado;
+  switch (red.broker) {
+    case EstadoBroker::Conectado:
+      a.broker = 2;
+      break;
+    case EstadoBroker::Rechazado:
+      a.broker = 3;
+      break;
+    default:
+      a.broker = red.broker == EstadoBroker::Conectando ? 1 : 0;
+  }
+  a.red = red.aviso[0] ? red.aviso : (a.wifi ? red.ssid : "");
+  a.ms = ahora;
+  dibujarArranque(oled, a);
+  oled.display();
+}
+
 void actualizarPantallas(uint32_t ahora) {
-  static uint32_t tPrincipal = 0, tEcg = 0;
-  if (oledEcgOk && ahora - tEcg >= 40) {  // 25 cuadros/s: el barrido se ve fluido
-    tEcg = ahora;
-    VistaEcg v;
-    v.electrodos = ecg.resultado().electrodos;
-    v.fc = ecg.resultado().fc;
-    v.pulso = ahora - msLatidoEcg < 150;
-    v.ms = ahora;
-    dibujarEcg(oledEcg, barrido, v);
-    oledEcg.display();
+  static uint32_t tPrincipal = 0, tEcg = 0, tCambio = 0;
+  static bool mostrandoEcg = false;
+
+  if (oledEcgOk) {  // hay OLED 128x32: el ECG va fijo ahí
+    mostrandoEcg = false;
+    if (ahora - tEcg >= 40) {  // 25 cuadros/s: el barrido se ve fluido
+      tEcg = ahora;
+      dibujarEcg(oledEcg, barrido, vistaEcg(ahora));
+      oledEcg.display();
+    }
+  } else {
+    // Una sola OLED: alterna signos y ECG. El ECG solo con electrodos puestos y nunca tapa una caída.
+    const bool alerta = msCaida != 0 && ahora - msCaida < 30000;
+    if (!sesion.monitoreando() || !ecg.resultado().electrodos || alerta) {
+      if (mostrandoEcg) tCambio = ahora;
+      mostrandoEcg = false;
+    } else if (ahora - tCambio >= (mostrandoEcg ? PANTALLA_ECG_MS : PANTALLA_SIGNOS_MS)) {
+      mostrandoEcg = !mostrandoEcg;
+      tCambio = ahora;
+    }
   }
-  if (oledOk && ahora - tPrincipal >= 200) {  // 5 cuadros/s bastan para números
-    tPrincipal = ahora;
-    const EstadoRed red = redEstado();
-    const ResultadoPpg& p = ppg.resultado();
-    VistaPrincipal v;
-    v.wifiBarras = barrasWifi(red);
-    switch (red.broker) {
-      case EstadoBroker::Conectado:
-        v.broker = 2;
-        break;
-      case EstadoBroker::Conectando:
-        v.broker = 1;
-        break;
-      case EstadoBroker::Rechazado:
-        v.broker = 3;
-        break;
-      default:
-        v.broker = 0;
+
+  if (!oledOk) return;
+  const EstadoRed red = redEstado();
+  if (enArranque(ahora, red)) {  // solo la pantalla principal: una OLED del ECG sigue con su trazo
+    mostrandoEcg = false;
+    tCambio = ahora;  // al terminar el arranque se empieza por los signos
+    if (ahora - tPrincipal >= 200) {
+      tPrincipal = ahora;
+      dibujarPantallaArranque(ahora, red);
     }
-    v.pendientes = red.pendientes;
-    const time_t t = time(nullptr);
-    struct tm local;
-    if (red.horaSincronizada && localtime_r(&t, &local)) {
-      v.horaValida = true;
-      v.hora = (uint8_t)local.tm_hour;
-      v.minuto = (uint8_t)local.tm_min;
-    }
-    v.sensorPpg = ppgOk;
-    v.ppg = p.estado;
-    v.progreso = p.progreso;
-    v.fc = fcActual(&v.fcDelEcg);
-    v.spo2 = p.spo2;
-    v.pulso = ahora - (v.fcDelEcg ? msLatidoEcg : msLatidoPpg) < 150;
-    v.sondaTemp = tempPresente();
-    v.tempValida = tempValida();
-    v.temp = tempCelsius();
-    v.acelerometro = acelOk;
-    v.movimiento = caidas.actividad() == Actividad::Movimiento;
-    v.alertaCaida = msCaida != 0 && ahora - msCaida < 30000;
-    v.codigo = CODIGO_DISPOSITIVO;
-    v.avisoRed = red.aviso[0] != 0;
-    v.red = v.avisoRed ? red.aviso : (red.wifi == EstadoWifi::Conectado ? red.ssid : "buscando");
-    v.ms = ahora;
+    return;
+  }
+
+  // ECG a 20 cuadros/s (cada cuadro de 128x64 tarda ~25 ms en el I2C); signos a 5 cuadros/s
+  if (ahora - tPrincipal < (mostrandoEcg ? 50u : 200u)) return;
+  tPrincipal = ahora;
+  const VistaPrincipal v = vistaPrincipal(ahora, red);
+  if (mostrandoEcg)
+    dibujarEcgCompleto(oled, barrido, v, vistaEcg(ahora));
+  else
     dibujarPrincipal(oled, v);
-    oled.display();
-  }
+  oled.display();
 }
 
 void atenderSerial(uint32_t ahora) {
@@ -278,20 +433,30 @@ void atenderSerial(uint32_t ahora) {
   const ResultadoPpg& p = ppg.resultado();
   bool delEcg;
   const int fc = fcActual(&delEcg);
-  char temp[12];
-  if (tempValida())
-    snprintf(temp, sizeof temp, "%.1f C", tempCelsius());
-  else
-    strcpy(temp, tempPresente() ? "--" : "sin sonda");
+  char temp[40];
+  switch (temperatura.estado()) {
+    case EstadoTemperatura::SinSonda:
+      strcpy(temp, "sin sonda");
+      break;
+    case EstadoTemperatura::SinContacto:
+      snprintf(temp, sizeof temp, "%.1f C al aire (no se envia)", temperatura.valor());
+      break;
+    case EstadoTemperatura::Estabilizando:
+      snprintf(temp, sizeof temp, "%.1f C estabilizando", temperatura.valor());
+      break;
+    default:
+      snprintf(temp, sizeof temp, "%.1f C %s%s", temperatura.valor(), EvaluadorTemperatura::nombre(temperatura.rango()),
+               temperatura.predicha() ? " (predicha)" : "");
+  }
   const char* mqtt = red.broker == EstadoBroker::Conectado    ? "OK"
                      : red.broker == EstadoBroker::Rechazado ? "usuario/clave rechazados"
                      : red.broker == EstadoBroker::Conectando ? "conectando"
                                                               : "--";
-  Serial.printf("FC %d (%s) | SpO2 %d | dedo %s IR %lu PI %.2f%% | T %s | %s | ECG %s | Wi-Fi %s %d dBm | "
+  Serial.printf("%s | FC %d (%s) | SpO2 %d | dedo %s IR %lu PI %.2f%% | T %s | %s | ECG %s | Wi-Fi %s %d dBm | "
                 "MQTT %s | pendientes %u, enviadas %lu\n",
-                fc, delEcg ? "ECG" : "PPG", p.spo2, ppg.hayDedo() ? "SI" : "NO", (unsigned long)ppg.ultimoIr(),
-                p.perfusion, temp, caidas.actividad() == Actividad::Movimiento ? "movimiento" : "reposo",
-                ecg.resultado().electrodos ? "conectado" : "sin electrodos",
+                sesion.monitoreando() ? "MONITOREO" : "ESPERA", fc, delEcg ? "ECG" : "PPG", p.spo2,
+                ppg.hayDedo() ? "SI" : "NO", (unsigned long)ppg.ultimoIr(), p.perfusion, temp, caidas.actividad() == Actividad::Movimiento ? "movimiento" : "reposo",
+                !ecgModuloPresente() ? "sin modulo AD8232" : (ecg.resultado().electrodos ? "conectado" : "sin electrodos"),
                 red.wifi == EstadoWifi::Conectado ? red.ssid : "buscando", red.rssi, mqtt, red.pendientes,
                 (unsigned long)red.enviadas);
 }
@@ -301,7 +466,8 @@ void loop() {
   atenderPpg(ahora);
   atenderAcelerometro(ahora);
   atenderEcg(ahora);
-  tempActualizar(ahora);
+  atenderTemperatura(ahora);
+  atenderSesion(ahora);
   reintentarSensores(ahora);
   emitirTelemetria(ahora);
   actualizarPantallas(ahora);

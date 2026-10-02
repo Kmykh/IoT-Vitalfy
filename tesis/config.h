@@ -45,10 +45,13 @@
 #define PIN_ECG_SALIDA 1    // AD8232 OUTPUT (ADC1: funciona con el Wi-Fi encendido)
 #define PIN_ECG_LO_MENOS 2  // AD8232 LO-
 #define PIN_ECG_LO_MAS 3    // AD8232 LO+. SDN al aire o a 3V3: SDN a GND APAGA el AD8232
+#define PIN_BOTON 0         // botón BOOT de la placa: en el arranque, sigue aunque falte un sensor
 
 // ============================ Sensores ============================
-#define PPG_CORRIENTE_LED 60  // MAX30102: 0x3C ≈ 12 mA, no satura el ADC con el dedo puesto
-// Detección de dedo (conteos IR). Medidos en este montaje: cuarto oscuro ~1k, frente al teclado ~17k
+#define PPG_CORRIENTE_LED 60  // MAX30102: 0x3C ≈ 12 mA
+#define PPG_RANGO_ADC 16384   // nA de fondo de escala. Con 4096 el dedo saturaba el ADC (IR = 262143)
+// Detección de dedo (conteos IR). Con rango 16384 los niveles son ~1/4 de los medidos antes con 4096
+// (cuarto oscuro ~1k -> ~300, teclado ~17k -> ~4k); un dedo queda muy por encima de DEDO_MINIMO.
 #define DEDO_SALTO 3000       // subida mínima del IR sobre el ambiente
 #define DEDO_MINIMO 8000      // IR mínimo con dedo
 #define DEDO_SALIDA 5000      // bajo esto el dedo se da por retirado
@@ -56,5 +59,14 @@
 #define SPO2_A -45.060f
 #define SPO2_B 30.354f
 #define SPO2_C 94.845f
+
+// Temperatura (DS18B20, ver temperatura.h): solo se informa con la sonda sobre la piel y estable.
+// Colóquela en la axila: en la mano o al aire marca 24–33 °C, que no es la temperatura corporal.
+#define TEMP_MIN_CONTACTO 32.0f  // °C: por debajo, la sonda está al aire y no se envía
+#define TEMP_CORRECCION_C 0.0f   // °C a sumar: diferencia medida contra un termómetro clínico en el mismo sitio
+
+// Pantallas: con una sola OLED se alterna entre los signos y el ECG (solo con electrodos puestos)
+#define PANTALLA_SIGNOS_MS 10000
+#define PANTALLA_ECG_MS 6000
 
 #define ECG_FRECUENCIA_RED_HZ 60  // interferencia de la red eléctrica que filtra el notch (Perú: 60 Hz)

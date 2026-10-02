@@ -87,8 +87,11 @@ const char* razonTexto(int r) {
       return "senal perdida";
     case 0:
       return "sin respuesta";
-    default:
-      return "otro motivo";
+    default: {
+      static char otro[24];
+      snprintf(otro, sizeof otro, "codigo %d", r);
+      return otro;
+    }
   }
 }
 
@@ -346,6 +349,7 @@ void conectar(uint32_t ahora) {
     Serial.printf("[red] Wi-Fi: conectando a \"%s\" (%d dBm, canal %d)\n", r.ssid, (int)c.rssi, (int)c.canal);
   else
     Serial.printf("[red] Wi-Fi: \"%s\" no aparecio en el escaneo; se intenta igual\n", r.ssid);
+  WiFi.disconnect();  // corta el intento anterior: con uno en curso, begin() falla ("sta is connecting")
   razonDesconexion = 0;
   if (c.visto)
     WiFi.begin(r.ssid, r.clave, c.canal, c.bssid);
@@ -402,8 +406,9 @@ void atenderWifi(uint32_t ahora) {
         break;
       }
       const int razon = razonDesconexion;
-      // el router ya respondió que no (ASSOC_LEAVE es una desconexión pedida por el propio ESP32)
-      const bool fallo = razon != 0 && razon != WIFI_REASON_ASSOC_LEAVE && ahora - tFase > 2000;
+      // el router ya respondió que no (ASSOC_LEAVE y STA_LEAVING los genera el propio disconnect())
+      const bool propia = razon == WIFI_REASON_ASSOC_LEAVE || razon == WIFI_REASON_STA_LEAVING;
+      const bool fallo = razon != 0 && !propia && ahora - tFase > 2000;
       if (!fallo && ahora - tFase < kTiempoConexionMs) break;
       Serial.printf("[red] Wi-Fi: no se pudo conectar a \"%s\" (%s)\n", REDES_WIFI[candidatos[iCandidato].red].ssid,
                     razonTexto(razon));

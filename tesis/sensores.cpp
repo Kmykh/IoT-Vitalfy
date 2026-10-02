@@ -56,6 +56,7 @@ bool tempEsta = false, tempOk = false, tempPrimeraBusqueda = true;
 float celsius = 0;
 uint32_t tFaseTemp = 0, tUltimaTemp = 0;
 uint8_t fallosTemp = 0;
+uint32_t lecturasTemp = 0;
 Historial<3> ultimasTemps;
 
 // ---------- AD8232 ----------
@@ -64,13 +65,36 @@ MuestraEcg anilloEcg[kAnilloEcg];
 std::atomic<uint32_t> escritasEcg{0};
 uint32_t leidasEcg = 0;
 uint8_t pinEcgSalida, pinEcgLoMas, pinEcgLoMenos;
+std::atomic<bool> moduloEcg{false};
+
+// ¿Hay un AD8232 manejando LO+ y LO-? Un módulo conectado fija su nivel (alto sin electrodos, bajo
+// con electrodos) y no le afectan las resistencias internas del ESP32. Un pin al aire las sigue:
+// si al cambiar de pull-down a pull-up cambia la lectura, no hay módulo (o falta un cable).
+bool moduloResponde() {
+  pinMode(pinEcgLoMas, INPUT_PULLDOWN);
+  pinMode(pinEcgLoMenos, INPUT_PULLDOWN);
+  delayMicroseconds(30);
+  const int bajoMas = digitalRead(pinEcgLoMas), bajoMenos = digitalRead(pinEcgLoMenos);
+  pinMode(pinEcgLoMas, INPUT_PULLUP);
+  pinMode(pinEcgLoMenos, INPUT_PULLUP);
+  delayMicroseconds(30);
+  return bajoMas == digitalRead(pinEcgLoMas) && bajoMenos == digitalRead(pinEcgLoMenos);
+}
 
 void tareaEcg(void*) {
   TickType_t ultimo = xTaskGetTickCount();
   uint8_t cuentaSuelto = 0, cuentaPuesto = 0;
   bool conectados = false;
+  uint16_t ciclos = 249;
+  bool anterior = false;
   for (;;) {
     vTaskDelayUntil(&ultimo, pdMS_TO_TICKS(4));  // 250 Hz exactos
+    if (++ciclos == 250) {  // una vez por segundo; dos resultados iguales seguidos para cambiar
+      ciclos = 0;
+      const bool presente = moduloResponde();
+      if (presente == anterior) moduloEcg = presente;
+      anterior = presente;
+    }
     const bool suelto = digitalRead(pinEcgLoMas) == HIGH || digitalRead(pinEcgLoMenos) == HIGH;
     if (suelto) {
       cuentaPuesto = 0;
@@ -92,12 +116,41 @@ bool i2cPresente(TwoWire& bus, uint8_t direccion) {
   return bus.endTransmission() == 0;
 }
 
+void i2cLiberarBus(uint8_t sda, uint8_t scl) {
+  pinMode(sda, INPUT_PULLUP);
+  pinMode(scl, OUTPUT_OPEN_DRAIN);
+  digitalWrite(scl, HIGH);
+  for (int i = 0; i < 9 && digitalRead(sda) == LOW; i++) {  // hasta 9 pulsos: el esclavo suelta SDA
+    digitalWrite(scl, LOW);
+    delayMicroseconds(5);
+    digitalWrite(scl, HIGH);
+    delayMicroseconds(5);
+  }
+  pinMode(sda, OUTPUT_OPEN_DRAIN);  // condición de STOP: SDA sube con SCL en alto
+  digitalWrite(sda, LOW);
+  delayMicroseconds(5);
+  digitalWrite(sda, HIGH);
+  delayMicroseconds(5);
+}
+
+void i2cEscanear(TwoWire& bus, char* buf, size_t tam) {
+  size_t n = 0;
+  buf[0] = 0;
+  for (uint8_t dir = 0x08; dir < 0x78; dir++) {
+    if (!i2cPresente(bus, dir)) continue;
+    const int k = snprintf(buf + n, tam - n, "%s0x%02X", n ? " " : "", dir);
+    if (k < 0 || (size_t)k >= tam - n) break;
+    n += (size_t)k;
+  }
+  if (n == 0) snprintf(buf, tam, "ninguno");
+}
+
 // ============================ MAX30102 ============================
-bool ppgIniciar(TwoWire& bus, uint8_t corrienteLed) {
+bool ppgIniciar(TwoWire& bus, uint8_t corrienteLed, int rangoAdc) {
   busPpg = &bus;
   if (!max30102.begin(bus, 400000)) return false;
-  // brillo, promedio de 4, modo rojo+IR, 400 muestras/s, pulso de 411 µs (18 bits), rango 4096 nA
-  max30102.setup(corrienteLed, 4, 2, 400, 411, 4096);
+  // brillo, promedio de 4, modo rojo+IR, 400 muestras/s, pulso de 411 µs (18 bits), rango del ADC
+  max30102.setup(corrienteLed, 4, 2, 400, 411, rangoAdc);
   return true;
 }
 
@@ -200,6 +253,7 @@ void tempActualizar(uint32_t ahora) {
       fallosTemp = 0;
       ultimasTemps.agregar(t);
       celsius = ultimasTemps.medianaUltimos(3);
+      lecturasTemp++;
       tempOk = true;
       tUltimaTemp = ahora;
       break;
@@ -211,6 +265,7 @@ void tempActualizar(uint32_t ahora) {
 bool tempPresente() { return tempEsta; }
 bool tempValida() { return tempOk; }
 float tempCelsius() { return celsius; }
+uint32_t tempLecturas() { return lecturasTemp; }
 
 // ============================ AD8232 ============================
 void ecgIniciar(uint8_t pinSalida, uint8_t pinLoMas, uint8_t pinLoMenos) {
@@ -226,6 +281,8 @@ void ecgIniciar(uint8_t pinSalida, uint8_t pinLoMas, uint8_t pinLoMenos) {
   // Núcleo 1 con más prioridad que el loop: interrumpe unos µs cada 4 ms, aun mientras se dibuja
   xTaskCreatePinnedToCore(tareaEcg, "ecg", 3072, nullptr, 5, nullptr, 1);
 }
+
+bool ecgModuloPresente() { return moduloEcg; }
 
 int ecgLeer(MuestraEcg* destino, int max) {
   const uint32_t escritas = escritasEcg.load(std::memory_order_acquire);

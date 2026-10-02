@@ -9,7 +9,9 @@ const float kRrMax = 2.4f;            // s (25 lpm)
 const float kVigencia = 3.0f;         // s sin QRS para dar la FC por perdida
 const float kAsentamiento = 0.5f;     // s tras conectar los electrodos
 const float kAprendizaje = 2.0f;      // s para fijar los umbrales iniciales
-const float kIrregularidadMax = 0.25f;
+const float kIrregularidadMax = 0.20f;
+// El AD8232 se va a los rieles del ADC cuando se mueven o rozan los electrodos: esos saltos no son QRS
+const int kRielBajo = 40, kRielAlto = 4055;
 }  // namespace
 
 ProcesadorEcg::ProcesadorEcg(const ParametrosEcg& p) : p_(p) {
@@ -33,6 +35,8 @@ float ProcesadorEcg::procesar(int crudo, bool conectados, bool* latido) {
   }
   const float x = (float)crudo - 2048.0f;  // el AD8232 reposa a media escala
   if (!r_.electrodos) reiniciar(x);
+  // Señal saturada: se reinicia la detección y vuelve a aprender 2,5 s después de la última saturación
+  if (crudo <= kRielBajo || crudo >= kRielAlto) reiniciarDeteccion();
 
   float v = paVis_.procesar(x);
   if (usarNotch_) v = notch_.procesar(v);
@@ -120,12 +124,19 @@ float ProcesadorEcg::procesar(int crudo, bool conectados, bool* latido) {
 void ProcesadorEcg::reiniciar(float x0) {
   r_ = ResultadoEcg();
   r_.electrodos = true;
-  muestraConexion_ = n_;
   paVis_.asentar(x0);
   notch_.asentar(0);
   pbVis_.asentar(0);
   paQrs_.asentar(x0);
   pbQrs_.asentar(0);
+  reiniciarDeteccion();
+}
+
+void ProcesadorEcg::reiniciarDeteccion() {
+  r_.fc = -1;
+  r_.latidos = 0;
+  r_.irregularidad = 0;
+  muestraConexion_ = n_;
   for (float& q : q_) q = 0;
   for (float& h : historial_) h = 0;
   for (int i = 0; i < kMaxVentana; i++) cuadrados_[i] = pendientes_[i] = 0;

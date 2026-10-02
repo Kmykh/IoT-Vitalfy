@@ -39,7 +39,8 @@ class ProcesadorEcg {
 
  private:
   uint32_t muestras(float segundos) const { return (uint32_t)(segundos * p_.fs + 0.5f); }
-  void reiniciar(float x0);
+  void reiniciar(float x0);       // electrodos recién conectados: filtros y detección
+  void reiniciarDeteccion();      // tras un artefacto: solo la detección de QRS
   uint32_t ubicarPicoR(uint32_t m) const;
   void aceptarQrs(uint32_t muestra, float pendiente, uint32_t picoR);
 

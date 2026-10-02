@@ -1,4 +1,7 @@
-// pantallas.h — Diseño de las dos OLED (se dibuja sobre Adafruit_GFX, sin tocar el hardware).
+// pantallas.h — Diseño de las OLED (se dibuja sobre Adafruit_GFX, sin tocar el hardware).
+//
+// Con una sola OLED (128x64), el firmware alterna cada pocos segundos entre la pantalla de signos y
+// el ECG a pantalla completa (dibujarEcgCompleto). Si además hay una OLED 128x32, el ECG va fijo ahí.
 //
 //   OLED principal 128x64                     OLED ECG 128x32
 //   ┌──────────────────────────────┐          ┌───────────────────────┬──────┐
@@ -17,6 +20,7 @@
 #include <stdint.h>
 
 #include "ppg.h"
+#include "temperatura.h"
 
 class Adafruit_GFX;
 
@@ -36,12 +40,17 @@ struct VistaPrincipal {
   bool fcDelEcg = false;     // de dónde sale la FC
   int spo2 = -1;             // % (-1 = sin dato)
   bool pulso = false;        // hubo un latido hace menos de ~150 ms
-  bool sondaTemp = false;    // DS18B20 presente
-  bool tempValida = false;
-  float temp = 0;            // °C
+  EstadoTemperatura estadoTemp = EstadoTemperatura::SinSonda;
+  float temp = 0;            // °C (corregidos)
+  RangoTemperatura rangoTemp = RangoTemperatura::Normal;
+  bool ecgInstalado = true;  // el módulo AD8232 responde
+  bool electrodos = false;   // electrodos del ECG puestos
   bool acelerometro = false; // ADXL345 presente
   bool movimiento = false;
   bool alertaCaida = false;
+
+  // Sesión: sin paciente se muestra qué falta conectar (ver sesion.h)
+  bool sesionActiva = false;
 
   // Pantalla de espera
   const char* codigo = "";   // código del dispositivo
@@ -52,11 +61,18 @@ struct VistaPrincipal {
 
 void dibujarPrincipal(Adafruit_GFX& g, const VistaPrincipal& v);
 
-// Pantalla de arranque con el chequeo de sensores.
+// Pantalla de arranque: chequeo del hardware y de la conexión. No sigue mientras falte un sensor o
+// los electrodos del ECG (el botón BOOT permite seguir igual) y espera al broker hasta 25 s.
 struct VistaArranque {
   const char* version = "";
   const char* codigo = "";
-  bool ppg = false, acelerometro = false, temperatura = false, oledEcg = false;
+  bool ppg = false, acelerometro = false, temperatura = false;
+  bool ecgModulo = false;    // el módulo AD8232 responde
+  bool electrodos = false;   // y los electrodos están conectados (sobre la piel)
+  bool wifi = false;         // conectado a una red
+  uint8_t broker = 0;        // 0 sin conexión, 1 conectando, 2 conectado, 3 usuario/clave rechazados
+  const char* red = "";      // red Wi-Fi, o un aviso de conectividad
+  uint32_t ms = 0;           // millis() para la animación de "conectando"
 };
 void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v);
 
@@ -64,10 +80,13 @@ void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v);
 // así el QRS (más angosto que una columna) no se pierde al comprimir el tiempo.
 class BarridoEcg {
  public:
-  static const int kAncho = 97;  // columnas del trazo (el resto es el panel de la FC)
+  static const int kAnchoMax = 128;
   static const int kHueco = 4;   // columnas borradas delante del cursor
 
-  explicit BarridoEcg(int muestrasPorColumna = 8);  // 250 Hz / 8 = 31 col/s: ~3 s en pantalla
+  // 250 Hz / 8 = 31 col/s: 128 columnas son ~4 s en pantalla
+  explicit BarridoEcg(int muestrasPorColumna = 8, int ancho = kAnchoMax);
+  void fijarAncho(int ancho);    // 128 en pantalla completa, 97 en la OLED 128x32 (deja el panel)
+  int ancho() const { return ancho_; }
   void agregar(float v);
   void limpiar();
 
@@ -83,9 +102,9 @@ class BarridoEcg {
   float rango() const { return rango_; }
 
  private:
-  float min_[kAncho], max_[kAncho], primero_[kAncho], ultimo_[kAncho];
-  bool valida_[kAncho];
-  int cursor_ = 0, enColumna_ = 0, porColumna_;
+  float min_[kAnchoMax], max_[kAnchoMax], primero_[kAnchoMax], ultimo_[kAnchoMax];
+  bool valida_[kAnchoMax];
+  int cursor_ = 0, enColumna_ = 0, porColumna_, ancho_;
   float accMin_ = 0, accMax_ = 0, accPrimero_ = 0, accUltimo_ = 0;
   float centro_ = 0, rango_ = 400;
 };
@@ -96,4 +115,6 @@ struct VistaEcg {
   bool pulso = false;
   uint32_t ms = 0;
 };
-void dibujarEcg(Adafruit_GFX& g, BarridoEcg& b, const VistaEcg& v);
+void dibujarEcg(Adafruit_GFX& g, BarridoEcg& b, const VistaEcg& v);  // OLED 128x32 dedicada
+// ECG en la OLED principal (128x64): barra de estado, FC del ECG y trazo de 128 columnas
+void dibujarEcgCompleto(Adafruit_GFX& g, BarridoEcg& b, const VistaPrincipal& p, const VistaEcg& v);
