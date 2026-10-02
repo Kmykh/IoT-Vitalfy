@@ -9,7 +9,7 @@ Firmware del wearable (ESP32-S3 Zero) y configuración de la red por donde viaja
 ```
 MAX30102 (FC, SpO2) ─┐
 AD8232   (ECG)      ─┤   ESP32-S3    ──Wi-Fi──>   Mosquitto          ──MQTT──>   Backend Vitalify
-DS18B20  (temp.)    ─┤   (tesis/)                (broker/, Docker              adaptador MQTT (fase 7)
+DS18B20  (temp.)    ─┤   (tesis/)                (broker/, Docker              ReceptorMqtt          
 ADXL345  (caídas)   ─┘                            en la laptop)                 → IRegistrarLectura
 ```
 
@@ -27,7 +27,7 @@ ADXL345  (caídas)   ─┘                            en la laptop)            
 
 - `ts` es el instante de la medición en UTC (NTP), con milisegundos. Una lectura tomada antes de tener hora recibe su hora real al sincronizar.
 - Lo que el sensor no midió se omite: sin dedo no van `fc` ni `spo2` (salvo que la FC venga del ECG), sin sonda no va `temp`. Sin paciente conectado no se envía nada.
-- Este hardware no mide `fr`, `pas`, `pad` ni `bateria`: NEWS2 y MEWS en el backend solo contarán con FC, SpO2 y temperatura.
+- Este hardware no mide `fr`, `pas`, `pad` ni `bateria`. El backend calcula NEWS2 y MEWS con FC, SpO2 y temperatura y marca el puntaje como parcial; la enfermera completa FR, presión, conciencia y oxígeno con `POST /api/v1/pacientes/{id}/observaciones` (`Backend/docs/motor-clinico.md`).
 - Se verificó con el código del backend: los JSON del firmware pasan por `MensajeTelemetria.Interpretar` y `EvaluadorSignos` sin errores.
 
 ## Estructura
@@ -151,12 +151,15 @@ tesis/pruebas/ejecutar.sh      # FC 40–200 lpm, SpO2, ruido, dícrota, onda T,
 - MQTT: cliente nativo de ESP-IDF con QoS 1, reconexión automática y *last will*. Si la laptop cambió de IP, vuelve a resolver su nombre.
 - Búfer: hasta 360 lecturas (1 h) sin red o sin broker; se envían en orden al volver (el backend acepta hasta 24 h de atraso y descarta duplicados por dispositivo + `ts`).
 
-## Para el adaptador MQTT del backend (fase 7)
+## Backend: receptor MQTT
 
-- Conectarse como `vitalify-backend` (clave en `broker/.env`) y suscribirse a `device/+/telemetria` con **QoS 1**.
-- Usar **sesión persistente** (clean session = false) con un client id fijo: así el broker guarda lo que llegue mientras el backend está caído (hasta 1000 mensajes).
-- Pasar el payload a `MensajeTelemetria.Interpretar(payload, OrigenLectura.Mqtt)` y luego a `IRegistrarLectura`.
-- Opcional: `device/+/estado` (retenido) dice en tiempo real si cada wearable está en línea.
+El backend ya lee este broker (`Backend/src/Vitalify.Api/Entrada/Mqtt/ReceptorMqtt.cs`):
+
+- Entra como `vitalify-backend` con **sesión persistente** y *client id* fijo, y se suscribe con **QoS 1** a `device/+/telemetria` y `device/+/estado`. Lo que llegue mientras el backend está caído queda en el broker (hasta 1000 mensajes).
+- Cada payload pasa por `MensajeTelemetria.Interpretar(payload, OrigenLectura.Mqtt)` y luego por `IRegistrarLectura`. El código del JSON debe coincidir con el del tópico.
+- `online`/`offline` se ve como `conexionSensor` en `GET /api/v1/pacientes/monitoreados`.
+- Configuración en el `.env` del backend: `Mqtt__Habilitado=true`, `Mqtt__Servidor=localhost`, `Mqtt__Usuario=vitalify-backend` y `Mqtt__Clave` = `MQTT_BACKEND_CLAVE` de `broker/.env`. Con el broker arriba, `/health` del backend muestra `mqtt: Healthy`.
+- El backend prueba este contrato con los mismos JSON de `tesis/pruebas/pruebas.cpp` (`ContratoFirmwareTests`) y publicándolos en un Mosquitto real (`IotMqttTests`).
 
 ## Problemas frecuentes
 
