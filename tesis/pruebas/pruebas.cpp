@@ -202,6 +202,34 @@ static void pruebasEcg() {
     VERIFICAR(fabs(r.fc - 75) <= 4, "fc %d con ruido", r.fc);
   }
   {
+    // Calidad: con buen contacto no hay aviso; con un electrodo flojo (mucha red de 60 Hz) sí, sin FC,
+    // y al volver el buen contacto el aviso se va y la FC vuelve
+    ProcesadorEcg p;
+    GeneradorEcg g;
+    ResultadoEcg r = correrEcg(p, g, 10);
+    printf("  buen contacto -> ruido de red %.0f RMS, ruidosa %d, fc %d\n", r.ruidoRed, r.ruidosa, r.fc);
+    VERIFICAR(!r.ruidosa, "señal limpia marcada ruidosa (red %.0f RMS)", r.ruidoRed);
+    g.red = 400;
+    r = correrEcg(p, g, 5);
+    printf("  electrodo flojo (red 400) -> ruido de red %.0f RMS, ruidosa %d, fc %d\n", r.ruidoRed, r.ruidosa, r.fc);
+    VERIFICAR(r.ruidosa, "no avisó con %.0f conteos RMS de red", r.ruidoRed);
+    VERIFICAR(r.fc == -1, "dio FC %d con la señal ruidosa", r.fc);
+    g.red = 60;
+    r = correrEcg(p, g, 8);
+    printf("  vuelve el buen contacto -> ruidosa %d, fc %d\n", r.ruidosa, r.fc);
+    VERIFICAR(!r.ruidosa, "el aviso de ruido no se fue (red %.0f RMS)", r.ruidoRed);
+    VERIFICAR(fabs(r.fc - 75) <= 2, "no recuperó la FC tras el ruido (fc %d)", r.fc);
+  }
+  {
+    // Al conectar, el AD8232 toca el riel mientras se asienta: eso no es una señal ruidosa
+    ProcesadorEcg p;
+    GeneradorEcg g;
+    for (int i = 0; i < 100; i++) p.procesar(4095, true);  // 0,4 s en el riel
+    ResultadoEcg r = correrEcg(p, g, 1);
+    printf("  asentamiento al conectar -> saturación %.1f %%, ruidosa %d\n", 100 * r.saturacion, r.ruidosa);
+    VERIFICAR(!r.ruidosa, "marcó ruidosa el asentamiento (saturación %.1f %%)", 100 * r.saturacion);
+  }
+  {
     // Electrodos: se desconectan y se vuelven a conectar
     ProcesadorEcg p;
     GeneradorEcg g;
@@ -225,6 +253,7 @@ static void pruebasEcg() {
       if (latido) falsos++;
       if (i % 75 == 74) VERIFICAR(p.resultado().fc == -1, "dio FC %d durante los artefactos", p.resultado().fc);
     }
+    VERIFICAR(p.resultado().ruidosa, "no avisó con la señal saturada (%.0f %%)", 100 * p.resultado().saturacion);
     ResultadoEcg r = correrEcg(p, g, 8);
     printf("  artefactos de riel -> QRS falsos %d, FC al pasar %d\n", falsos, r.fc);
     VERIFICAR(falsos == 0, "contó %d artefactos como QRS", falsos);

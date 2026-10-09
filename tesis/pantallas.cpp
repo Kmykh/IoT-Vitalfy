@@ -468,7 +468,7 @@ void BarridoEcg::fijarAncho(int ancho) {
 void BarridoEcg::limpiar() {
   for (int x = 0; x < kAnchoMax; x++) {
     valida_[x] = false;
-    min_[x] = max_[x] = primero_[x] = ultimo_[x] = 0;
+    min_[x] = max_[x] = primero_[x] = ultimo_[x] = media_[x] = 0;
   }
   cursor_ = 0;
   enColumna_ = 0;
@@ -477,17 +477,20 @@ void BarridoEcg::limpiar() {
 void BarridoEcg::agregar(float v) {
   if (enColumna_ == 0) {
     accMin_ = accMax_ = accPrimero_ = v;
+    accSuma_ = 0;
   } else {
     if (v < accMin_) accMin_ = v;
     if (v > accMax_) accMax_ = v;
   }
   accUltimo_ = v;
+  accSuma_ += v;
   if (++enColumna_ < porColumna_) return;
   enColumna_ = 0;
   min_[cursor_] = accMin_;
   max_[cursor_] = accMax_;
   primero_[cursor_] = accPrimero_;
   ultimo_[cursor_] = accUltimo_;
+  media_[cursor_] = accSuma_ / (float)porColumna_;
   valida_[cursor_] = true;
   cursor_ = (cursor_ + 1) % ancho_;
   for (int k = 0; k < kHueco; k++) valida_[(cursor_ + k) % ancho_] = false;
@@ -522,11 +525,23 @@ void dibujarTrazo(Adafruit_GFX& g, BarridoEcg& b, int y0, int alto) {
     const int y = (int)lroundf(medio - (valor - centro) * escala);
     return y < y0 ? y0 : (y > y0 + alto - 1 ? y0 + alto - 1 : y);
   };
+  // Columna "fina" (variación de hasta 3 px): un punto en su promedio, unido al anterior. Columna con un
+  // salto mayor (QRS): de mínimo a máximo, entrando por su primer valor y saliendo por el último.
+  int salidaAnterior = -1;
   for (int x = 0; x < b.ancho(); x++) {
-    if (!b.valida(x)) continue;
+    if (!b.valida(x)) {
+      salidaAnterior = -1;
+      continue;
+    }
     const int arriba = aY(b.maximo(x)), abajo = aY(b.minimo(x));
-    g.drawFastVLine(x, arriba, abajo - arriba + 1, kOn);
-    if (x > 0 && b.valida(x - 1)) g.drawLine(x - 1, aY(b.ultimo(x - 1)), x, aY(b.primero(x)), kOn);
+    const bool fina = abajo - arriba <= 3;
+    const int entrada = fina ? aY(b.media(x)) : aY(b.primero(x));
+    if (fina)
+      g.drawPixel(x, entrada, kOn);
+    else
+      g.drawFastVLine(x, arriba, abajo - arriba + 1, kOn);
+    if (salidaAnterior >= 0) g.drawLine(x - 1, salidaAnterior, x, entrada, kOn);
+    salidaAnterior = fina ? entrada : aY(b.ultimo(x));
   }
 }
 }  // namespace
@@ -540,22 +555,28 @@ void dibujarEcg(Adafruit_GFX& g, BarridoEcg& b, const VistaEcg& v) {
 
   // Panel derecho: FC del ECG
   texto(g, panel + 3, 0, "ECG");
-  icono(g, 121, 1, v.pulso ? kCorazonLleno : kCorazonVacio);
+  icono(g, 121, 1, v.pulso && v.electrodos && !v.ruido ? kCorazonLleno : kCorazonVacio);
   char s[12];
-  if (v.electrodos && v.fc > 0)
+  if (v.electrodos && !v.ruido && v.fc > 0)
     snprintf(s, sizeof s, "%d", v.fc);
   else
     strcpy(s, "--");
   numeroGrande(g, &FreeSansBold9pt7b, panel + 15, 23, s);
   textoCentrado(g, panel + 15, 25, "lpm");
 
+  const int cx = b.ancho() / 2;
   if (!v.electrodos) {
-    const int cx = b.ancho() / 2;
     if ((v.ms / 700) % 2) {
       textoCentrado(g, cx, 7, "Electrodos");
       textoCentrado(g, cx, 17, "desconectados");
     }
     g.drawFastHLine(0, 30, b.ancho(), kOn);
+    return;
+  }
+  if (v.ruido) {  // dibujar el ruido no sirve: se dice qué hacer, con la línea de base quieta
+    textoCentrado(g, cx, 3, "Se\xA4" "al con ruido");  // 0xA4 = ñ en CP437
+    textoCentrado(g, cx, 13, (v.ms / 2000) % 2 ? "Revise el RL" : "Fije electrodos");
+    for (int x = 0; x < b.ancho(); x += 3) g.drawPixel(x, 27, kOn);
     return;
   }
   dibujarTrazo(g, b, 0, 32);

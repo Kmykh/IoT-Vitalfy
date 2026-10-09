@@ -162,6 +162,12 @@ int main() {
   dibujarEcg(ecg, barrido, ve);
   guardar(ecg, "11_ecg_sin_electrodos");
 
+  ve.electrodos = true;
+  ve.ruido = true;  // electrodo flojo o sin RL: mucha red de 60 Hz o el ADC saturado
+  ve.ms = 1000;
+  dibujarEcg(ecg, barrido, ve);
+  guardar(ecg, "11b_ecg_con_ruido");
+
   // OLED del ECG durante el arranque: verificación animada
   VistaArranque va;
   va.ppg = va.acelerometro = va.temperatura = va.ecgModulo = va.wifi = true;

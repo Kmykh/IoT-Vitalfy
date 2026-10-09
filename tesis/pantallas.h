@@ -86,8 +86,9 @@ void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v);
 // listos y un latido que recorre la pantalla mientras tanto.
 void dibujarVerificacion(Adafruit_GFX& g, const VistaArranque& v);
 
-// Trazo del ECG en modo barrido: guarda mínimo, máximo, primer y último valor por columna,
-// así el QRS (más angosto que una columna) no se pierde al comprimir el tiempo.
+// Trazo del ECG en modo barrido: guarda mínimo, máximo, primer y último valor y el promedio por
+// columna. Una columna con mucha variación (el QRS, más angosto que una columna) se dibuja de mínimo a
+// máximo para no perderlo; las demás, con su promedio, así el ruido leve no engrosa la línea.
 class BarridoEcg {
  public:
   static const int kAnchoMax = 128;
@@ -106,21 +107,23 @@ class BarridoEcg {
   float maximo(int x) const { return max_[x]; }
   float primero(int x) const { return primero_[x]; }
   float ultimo(int x) const { return ultimo_[x]; }
+  float media(int x) const { return media_[x]; }
   // Escala automática al rango visible: crece de golpe y se achica despacio (el trazo no "respira").
   void actualizarEscala();
   float centro() const { return centro_; }
   float rango() const { return rango_; }
 
  private:
-  float min_[kAnchoMax], max_[kAnchoMax], primero_[kAnchoMax], ultimo_[kAnchoMax];
+  float min_[kAnchoMax], max_[kAnchoMax], primero_[kAnchoMax], ultimo_[kAnchoMax], media_[kAnchoMax];
   bool valida_[kAnchoMax];
   int cursor_ = 0, enColumna_ = 0, porColumna_, ancho_;
-  float accMin_ = 0, accMax_ = 0, accPrimero_ = 0, accUltimo_ = 0;
+  float accMin_ = 0, accMax_ = 0, accPrimero_ = 0, accUltimo_ = 0, accSuma_ = 0;
   float centro_ = 0, rango_ = 400;
 };
 
 struct VistaEcg {
   bool electrodos = false;
+  bool ruido = false;        // señal inservible (ResultadoEcg::ruidosa): se avisa en vez de dibujarla
   int fc = -1;
   bool pulso = false;
   uint32_t ms = 0;

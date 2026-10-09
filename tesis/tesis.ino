@@ -180,12 +180,20 @@ void atenderEcg(uint32_t ahora) {
       if (trazarEcg) Serial.printf("ecg:%.0f crudo:%u\n", v, m[i].adc);
     }
   }
-  static bool conectadosAntes = false;
-  const bool conectados = ecg.resultado().electrodos;
-  if (conectados != conectadosAntes) {
-    conectadosAntes = conectados;
-    if (!conectados) barrido.limpiar();
-    Serial.printf("ECG: electrodos %s\n", conectados ? "conectados" : "desconectados");
+  static bool conectadosAntes = false, ruidosaAntes = false;
+  const ResultadoEcg& r = ecg.resultado();
+  if (r.electrodos != conectadosAntes) {
+    conectadosAntes = r.electrodos;
+    if (!r.electrodos) barrido.limpiar();
+    Serial.printf("ECG: electrodos %s\n", r.electrodos ? "conectados" : "desconectados");
+  }
+  if (r.ruidosa != ruidosaAntes) {
+    ruidosaAntes = r.ruidosa;
+    if (r.ruidosa)
+      Serial.printf("ECG: senal con ruido (red %.0f RMS, saturada %.0f%%): fije los electrodos y el RL\n", r.ruidoRed,
+                    100 * r.saturacion);
+    else
+      Serial.println("ECG: senal limpia");
   }
 }
 
@@ -275,6 +283,7 @@ int8_t barrasWifi(const EstadoRed& r) {
 VistaEcg vistaEcg(uint32_t ahora) {
   VistaEcg v;
   v.electrodos = ecg.resultado().electrodos;
+  v.ruido = ecg.resultado().ruidosa;
   v.fc = ecg.resultado().fc;
   v.pulso = ahora - msLatidoEcg < 150;
   v.ms = ahora;
@@ -494,7 +503,10 @@ void atenderSerial(uint32_t ahora) {
                 "MQTT %s | pendientes %u, enviadas %lu\n",
                 sesion.monitoreando() ? "MONITOREO" : "ESPERA", fc, delEcg ? "ECG" : "PPG", p.spo2,
                 ppg.hayDedo() ? "SI" : "NO", (unsigned long)ppg.ultimoIr(), p.perfusion, temp, caidas.actividad() == Actividad::Movimiento ? "movimiento" : "reposo",
-                !ecgModuloPresente() ? "sin modulo AD8232" : (ecg.resultado().electrodos ? "conectado" : "sin electrodos"),
+                !ecgModuloPresente()          ? "sin modulo AD8232"
+                : !ecg.resultado().electrodos ? "sin electrodos"
+                : ecg.resultado().ruidosa     ? "con ruido"
+                                              : "conectado",
                 red.wifi == EstadoWifi::Conectado ? red.ssid : "buscando", red.rssi, mqtt, red.pendientes,
                 (unsigned long)red.enviadas);
 }

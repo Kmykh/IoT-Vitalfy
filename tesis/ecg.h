@@ -7,6 +7,10 @@
 //     cuadrado, integración en ventana de 150 ms y umbral adaptativo señal/ruido, con periodo
 //     refractario, rechazo de ondas T por pendiente y búsqueda hacia atrás de latidos perdidos.
 // FC = 60 / mediana de los últimos 5 RR; se descarta si los RR son demasiado irregulares (ruido).
+// Calidad: la señal es ruidosa si la interferencia de la red (lo que quita el notch) es grande o si
+// el ADC se satura seguido; suele ser un electrodo mal pegado o sin el de referencia (RL). Con señal
+// ruidosa no se informa FC y la OLED lo avisa en lugar de dibujar el ruido. Las muestras saturadas
+// no entran al trazo: se repite la última buena.
 // C++ puro: se prueba en el computador con señales sintéticas (pruebas/).
 #pragma once
 
@@ -24,6 +28,9 @@ struct ResultadoEcg {
   int fc = -1;               // lpm (-1 = sin dato confiable)
   uint32_t latidos = 0;      // QRS detectados desde que se conectaron los electrodos
   float irregularidad = 0;   // dispersión relativa de los RR (0 = regular)
+  bool ruidosa = false;      // señal inservible: mucha interferencia de la red o saturación
+  float ruidoRed = 0;        // conteos RMS de la interferencia de la red (lo que quita el notch)
+  float saturacion = 0;      // fracción de muestras en los rieles del ADC (últimos ~2 s)
 };
 
 class ProcesadorEcg {
@@ -47,11 +54,14 @@ class ProcesadorEcg {
   ParametrosEcg p_;
   ResultadoEcg r_;
   uint32_t n_ = 0;
-  uint32_t muestraConexion_ = 0;
+  uint32_t muestraConexion_ = 0;   // último reinicio de la detección (conexión o saturación)
+  uint32_t muestraElectrodos_ = 0; // conexión de los electrodos
 
   Biquad paVis_, notch_, pbVis_;  // visualización
   Biquad paQrs_, pbQrs_;          // detección
   bool usarNotch_ = true;
+  float xVis_ = 0;                // última muestra no saturada (la que sigue al trazo)
+  float potenciaRed_ = 0;         // promedio de la interferencia al cuadrado
 
   // Pan-Tompkins
   float q_[5] = {};                 // salida del pasa-banda (para la derivada de 5 puntos)
