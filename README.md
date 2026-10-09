@@ -87,6 +87,13 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc --libraries librari
 arduino-cli upload  --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc -p /dev/cu.usbmodem* tesis
 ```
 
+Con un **ESP32 DevKit** (ESP32 clásico, USB por CH340), la placa es *ESP32 Dev Module* y `config.h` toma sus pines solo:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32 --libraries libraries tesis
+arduino-cli upload  --fqbn esp32:esp32:esp32:UploadSpeed=460800 -p /dev/cu.usbserial-* tesis
+```
+
 ### 4. Verificar
 
 Monitor serie a 115200 baudios:
@@ -107,13 +114,31 @@ La tecla `p` en el monitor activa el trazado del ECG para el Serial Plotter. En 
 | Módulo | Pines | Notas |
 |---|---|---|
 | MAX30102, ADXL345, OLED 128x64 | SDA → GPIO5, SCL → GPIO6 | Bus I2C 0 a 400 kHz (0x57, 0x53, 0x3C) |
-| OLED 128x32 (ECG, opcional) | SDA → GPIO7, SCL → GPIO8 | Bus I2C 1 (0x3C). Sin ella, el ECG se muestra en la OLED principal |
+| OLED 128x32 (ECG) | SDA → GPIO7, SCL → GPIO8 | Bus I2C 1 (0x3C) |
 | DS18B20 | Datos → GPIO4 | Resistencia de 4,7 kΩ entre datos y 3V3 |
 | AD8232 | OUTPUT → GPIO1, LO− → GPIO2, LO+ → GPIO3 | SDN al aire o a 3V3. **SDN a GND apaga el AD8232** |
+
+### ESP32 DevKit (ESP32 clásico)
+
+| Módulo | Pines | Notas |
+|---|---|---|
+| MAX30102, ADXL345, OLED 128x64 | SDA → GPIO26, SCL → GPIO33 | Bus I2C 0 a 400 kHz (0x57, 0x53, 0x3C). Los GPIO 6 a 11 son de la flash: no se usan |
+| OLED 128x32 (ECG) | SDA → GPIO13 (D13), SCL → GPIO14 (D14) | Bus I2C 1. También es 0x3C: en el bus 0 chocaría con la OLED principal. **No usar D12** (está entre D14 y D13): GPIO12 en alto al reiniciar pone la flash a 1,8 V y el ESP32 no arranca. **Ni D2**: el LED azul de la placa mantiene la línea en bajo y la OLED no responde |
+| DS18B20 | Datos → GPIO25 | Resistencia de 4,7 kΩ entre datos y 3V3 |
+| AD8232 | OUTPUT → GPIO34, LO− → GPIO35, LO+ → GPIO32 | GPIO34 es ADC1 (funciona con el Wi-Fi encendido). 34 y 35 son solo entrada y no tienen pull-up interna: con una de 10 kΩ de GPIO35 a 3V3, un cable de LO− suelto se ve como "electrodos desconectados" en vez de ruido |
+| LED verde | GPIO27 (D27) → resistencia de 220–330 Ω → ánodo; cátodo → GND | Encendido: todo funciona (ver *Pantallas*) |
 
 Todos los módulos a 3V3 y GND del mismo riel. El Wi-Fi transmite a 11 dBm (`WIFI_POTENCIA_TX`) para no provocar caídas de tensión en ese riel.
 
 ## Pantallas
+
+Cada OLED tiene su función: la principal muestra el chequeo y los signos, y la delgada, la verificación y el ECG. Los números entre paréntesis son las vistas de `pantallas_oled.png`.
+
+| Momento | OLED principal (128x64) | OLED del ECG (128x32) | LED verde |
+|---|---|---|---|
+| Arranque | Chequeo de SpO2, Acel, Temp, ECG, Wi-Fi y MQTT (`01a`, `01b`) | Verificación animada: qué falta, `n/6`, latido y barra de progreso (`12`, `13`) | Se enciende cuando todo responde |
+| Espera del paciente | "Conecte al paciente" con ✓, ○ o ✗ por sensor (`01c`, `01d`) | ECG; sin electrodos, "Electrodos desconectados" (`11`) | Encendido si el equipo está bien |
+| Monitoreo | Signos: FC, SpO2, temperatura y alerta de caída (`02` a `09`) | ECG en barrido con la FC del ECG (`10`) | Encendido si el equipo está bien |
 
 **Arranque.** La pantalla de chequeo muestra SpO2, Acel, Temp, ECG, Wi-Fi y MQTT. En el ECG: `NO` = el módulo AD8232 no responde, `--` = responde pero los electrodos no están conectados, `OK` = electrodos conectados (el AD8232 solo los detecta sobre la piel). **No sigue mientras algún sensor diga NO o el ECG diga `--`** (se reintenta solo: puedes conectarlos en caliente); con todo OK espera la conexión al broker hasta 25 s y muestra "Todo conectado". El botón **BOOT** de la placa sigue igual aunque falte algo.
 
@@ -134,11 +159,17 @@ Todos los módulos a 3V3 y GND del mismo riel. El Wi-Fi transmite a 11 dBm (`WIF
 
 Sin dedo ni electrodos muestra el código del dispositivo, la red y la indicación de colocar el dedo.
 
-**ECG.** Trazo en barrido como en un monitor de cabecera (escala automática) y la FC calculada del ECG.
-- **Con una sola OLED:** la pantalla alterna entre los signos (10 s) y el ECG a pantalla completa (6 s, ~4 s de trazo). Solo cambia al ECG si los electrodos están puestos y nunca tapa una alerta de caída. Los tiempos están en `config.h` (`PANTALLA_SIGNOS_MS`, `PANTALLA_ECG_MS`).
-- **Con la OLED 128x32 conectada:** el ECG queda fijo en ella (~3 s de trazo) y la principal muestra solo los signos.
+**OLED del ECG (128x32).** Durante el arranque muestra su propia verificación: arriba, lo que falta ahora (`Conecte electrodos`, `Buscando Wi-Fi`, `Conectando MQTT`…) y cuántos de los seis chequeos están listos; en medio, un latido animado que recorre la pantalla, y abajo, una barra de progreso. Al terminar dice `Todo listo 6/6` y pasa al ECG: trazo en barrido como en un monitor de cabecera (escala automática, ~3 s de trazo) y, a la derecha, la FC calculada del ECG con un corazón que late con cada QRS. Sin electrodos parpadea "Electrodos desconectados". La OLED principal nunca muestra el ECG.
 
 `tesis/pruebas/vista_previa.sh` regenera `pantallas_oled.png` con el código real del firmware.
+
+**LED verde (GPIO27 en el DevKit).** Encendido fijo = todo funciona:
+
+- responden el MAX30102, el ADXL345, el DS18B20, el módulo AD8232 y las dos OLED;
+- hay Wi-Fi y hora NTP;
+- el broker MQTT está conectado, así que las lecturas llegan al backend.
+
+Apagado = algo falla. Cada vez que cambia, el monitor serie dice qué falta (`LED verde apagado: falta OLED-ECG MQTT`). El LED no depende del paciente: sin dedo ni electrodos el equipo igual está bien y el LED sigue encendido.
 
 ## Algoritmos
 
@@ -182,10 +213,13 @@ El backend ya lee este broker (`Backend/src/Vitalify.Api/Entrada/Mqtt/ReceptorMq
 | "Electrodos desconectados" | LO+ o LO− en alto | Revisar electrodos y que SDN no esté a GND |
 | "Sin sonda temp." | DS18B20 sin respuesta | Revisar la resistencia de 4,7 kΩ y GPIO4 |
 | "Coloque la sonda" | La sonda está al aire o en la mano (< 32 °C) | Colocarla en la axila y esperar a que deje de decir `midiendo` |
+| OLED del ECG apagada | No responde en el bus 1 (al arrancar, el monitor serie muestra `I2C bus 1 (SDA=13, SCL=14): ninguno`; si una línea está en bajo, antes dice cuál: `I2C bus 1: SCL en bajo en reposo`) | Revisar SDA/SCL de la OLED 128x32 (DevKit: D13 y D14) y su alimentación. Se reconecta sola en 5 s |
+| Ambas OLED apagadas y el monitor serie repite `boot:0x33` e `invalid magic number` | GPIO12 está en alto al reiniciar (un cable en D12) y la flash queda a 1,8 V | Sacar ese cable de D12 (la OLED del ECG va en D13 y D14) y reiniciar con EN |
+| LED verde apagado | Algo de la lista del LED falla | El monitor serie dice qué falta (`LED verde apagado: falta ...`). Si no dice nada y el LED no prende, revisar la polaridad y la resistencia |
 
 ## Limitaciones
 
 - La SpO2 usa la curva genérica de Maxim. Para la tesis conviene calibrar `SPO2_A/B/C` contra un oxímetro de referencia. No es un dispositivo médico certificado.
 - El DS18B20 mide la superficie donde está apoyado: en la piel marca menos que la temperatura central.
 - El búfer está en RAM: si el ESP32 se reinicia, se pierde lo que no se había enviado.
-- El firmware ocupa el 86 % de la partición de la app. Si se agregan funciones, elegir el esquema de particiones *Huge APP*.
+- El firmware ocupa el 88 % de la partición de la app en el DevKit (86 % en el S3). Si se agregan funciones, elegir el esquema de particiones *Huge APP*.
