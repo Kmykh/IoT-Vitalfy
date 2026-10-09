@@ -1,7 +1,8 @@
-// tesis.ino — Vitalify: wearable IoMT (ESP32-S3 Zero)
+// tesis.ino — Vitalify: wearable IoMT (ESP32 DevKit o ESP32-S3 Zero)
 //
 // Mide FC y SpO2 (MAX30102), ECG (AD8232), temperatura (DS18B20) y caídas (ADXL345), los muestra
-// en dos OLED y los envía al backend por MQTT según el contrato de telemetría.
+// en dos OLED (signos en la principal, ECG en la de 128x32) y los envía al backend por MQTT según
+// el contrato de telemetría. Un LED verde encendido indica que todo funciona.
 //
 //   Núcleo 1: este loop (sensores, algoritmos y pantallas) y la tarea que muestrea el ECG a 250 Hz.
 //   Núcleo 0: la tarea de red (Wi-Fi, NTP, MQTT y búfer offline). La red nunca frena al loop.
@@ -59,8 +60,9 @@ EvaluadorTemperatura temperatura(parametrosTemperatura());
 SesionPaciente sesion;
 ProcesadorEcg ecg(parametrosEcg());
 DetectorCaidas caidas;
-BarridoEcg barrido;
+BarridoEcg barrido(8, 97);  // OLED 128x32: 97 columnas de trazo (~3 s) y el panel de la FC
 
+constexpr bool kHayBus2 = PIN_I2C2_SDA >= 0;  // segundo bus I2C para la OLED del ECG
 bool oledOk = false, oledEcgOk = false, ppgOk = false, acelOk = false;
 uint32_t tDatosPpg = 0, tDatosAcel = 0, tReintento = 0;
 uint32_t msLatidoPpg = 0, msLatidoEcg = 0, msCaida = 0;
@@ -77,19 +79,38 @@ int fcActual(bool* delEcg) {
   return *delEcg ? e : p;
 }
 
+// Una línea I2C en bajo en reposo hace que cada consulta al bus espere 50 ms y nada responda: se avisa
+// cuál es, para saber qué cable revisar
+void revisarLineasI2c(int bus, uint8_t sda, uint8_t scl) {
+  const bool sdaAlto = i2cLineaEnAlto(sda), sclAlto = i2cLineaEnAlto(scl);
+  if (sdaAlto && sclAlto) return;
+  Serial.printf("I2C bus %d: %s%s%s en bajo en reposo (modulo sin alimentacion, cable a GND o en otro pin)\n", bus,
+                sdaAlto ? "" : "SDA", !sdaAlto && !sclAlto ? " y " : "", sclAlto ? "" : "SCL");
+  if (!sdaAlto) Serial.printf("  SDA = GPIO%d\n", sda);
+  if (!sclAlto) Serial.printf("  SCL = GPIO%d\n", scl);
+}
+
 void setup() {
   Serial.begin(115200);
-  Serial.setTxTimeoutMs(0);  // con el monitor cerrado, imprimir nunca bloquea el loop
+#if ARDUINO_USB_CDC_ON_BOOT
+  Serial.setTxTimeoutMs(0);  // USB nativo del S3: con el monitor cerrado, imprimir nunca bloquea el loop
+#endif
   pinMode(PIN_BOTON, INPUT_PULLUP);
+#if PIN_LED_OK >= 0
+  pinMode(PIN_LED_OK, OUTPUT);
+  digitalWrite(PIN_LED_OK, LOW);  // se enciende cuando todo responde (atenderLed)
+#endif
   Serial.printf("\n=== Vitalify %s | %s ===\n", FIRMWARE_VERSION, CODIGO_DISPOSITIVO);
 
+  revisarLineasI2c(0, PIN_I2C_SDA, PIN_I2C_SCL);
+  if (kHayBus2) revisarLineasI2c(1, PIN_I2C2_SDA, PIN_I2C2_SCL);
   i2cLiberarBus(PIN_I2C_SDA, PIN_I2C_SCL);  // por si un reset dejó una transmisión a medias
-  i2cLiberarBus(PIN_I2C2_SDA, PIN_I2C2_SCL);
+  if (kHayBus2) i2cLiberarBus(PIN_I2C2_SDA, PIN_I2C2_SCL);
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);
-  Wire1.begin(PIN_I2C2_SDA, PIN_I2C2_SCL, 400000);
+  if (kHayBus2) Wire1.begin(PIN_I2C2_SDA, PIN_I2C2_SCL, 400000);
   // periphBegin = false: los buses ya están iniciados con sus pines
   oledOk = i2cPresente(Wire, 0x3C) && oled.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
-  oledEcgOk = i2cPresente(Wire1, 0x3C) && oledEcg.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
+  oledEcgOk = kHayBus2 && i2cPresente(Wire1, 0x3C) && oledEcg.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
   ppgOk = ppgIniciar(Wire, PPG_CORRIENTE_LED, PPG_RANGO_ADC);
   acelOk = acelIniciar(Wire);
   tempIniciar(PIN_DS18B20);
@@ -100,12 +121,13 @@ void setup() {
   char dispositivos[64];
   i2cEscanear(Wire, dispositivos, sizeof dispositivos);
   Serial.printf("I2C bus 0 (SDA=%d, SCL=%d): %s\n", PIN_I2C_SDA, PIN_I2C_SCL, dispositivos);
-  i2cEscanear(Wire1, dispositivos, sizeof dispositivos);
-  Serial.printf("I2C bus 1 (SDA=%d, SCL=%d): %s\n", PIN_I2C2_SDA, PIN_I2C2_SCL, dispositivos);
+  if (kHayBus2) {
+    i2cEscanear(Wire1, dispositivos, sizeof dispositivos);
+    Serial.printf("I2C bus 1 (SDA=%d, SCL=%d): %s\n", PIN_I2C2_SDA, PIN_I2C2_SCL, dispositivos);
+  }
   Serial.printf("OLED %s | OLED ECG %s | MAX30102 %s | ADXL345 %s | DS18B20 %s\n", oledOk ? "OK" : "FALTA",
                 oledEcgOk ? "OK" : "FALTA", ppgOk ? "OK" : "FALTA", acelOk ? "OK" : "FALTA",
                 tempPresente() ? "OK" : "FALTA");
-  barrido.fijarAncho(oledEcgOk ? 97 : BarridoEcg::kAnchoMax);  // sin OLED del ECG: pantalla completa
   tDatosPpg = tDatosAcel = millis();
   enableLoopWDT();  // si el loop se colgara más de 5 s, el ESP32 se reinicia solo
 }
@@ -122,7 +144,7 @@ void atenderPpg(uint32_t ahora) {
     tDatosPpg = ahora;
   } else if (ahora - tDatosPpg > 2000) {
     ppgOk = false;
-    Serial.println("MAX30102 sin datos: se reintentara (revisa SDA=5/SCL=6)");
+    Serial.printf("MAX30102 sin datos: se reintentara (revisa SDA=%d/SCL=%d)\n", PIN_I2C_SDA, PIN_I2C_SCL);
   }
 }
 
@@ -209,10 +231,8 @@ void reintentarSensores(uint32_t ahora) {
   }
   if (!oledOk && i2cPresente(Wire, 0x3C) && (oledOk = oled.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false)))
     Serial.println("OLED principal conectada");
-  if (!oledEcgOk && i2cPresente(Wire1, 0x3C) && (oledEcgOk = oledEcg.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false))) {
-    barrido.fijarAncho(97);
+  if (kHayBus2 && !oledEcgOk && i2cPresente(Wire1, 0x3C) && (oledEcgOk = oledEcg.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false)))
     Serial.println("OLED del ECG conectada");
-  }
 }
 
 // Una lectura cada INTERVALO_TELEMETRIA_MS y otra en el instante en que se confirma una caída
@@ -345,7 +365,8 @@ bool enArranque(uint32_t ahora, const EstadoRed& red) {
   return !terminado;
 }
 
-void dibujarPantallaArranque(uint32_t ahora, const EstadoRed& red) {
+// red debe seguir viva mientras se use la vista (a.red apunta a su texto)
+VistaArranque vistaArranque(uint32_t ahora, const EstadoRed& red) {
   VistaArranque a;
   a.version = FIRMWARE_VERSION;
   a.codigo = CODIGO_DISPOSITIVO;
@@ -367,54 +388,71 @@ void dibujarPantallaArranque(uint32_t ahora, const EstadoRed& red) {
   }
   a.red = red.aviso[0] ? red.aviso : (a.wifi ? red.ssid : "");
   a.ms = ahora;
-  dibujarArranque(oled, a);
+  return a;
+}
+
+// Cada OLED tiene lo suyo. Durante el arranque, la principal muestra la lista de chequeos y la de
+// 128x32, la verificación animada; después, la principal muestra los signos y la de 128x32, el ECG.
+void actualizarPantallas(uint32_t ahora) {
+  static uint32_t tPrincipal = 0, tEcg = 0;
+  const EstadoRed red = redEstado();
+  const bool arranque = enArranque(ahora, red);  // en cada vuelta, para no perder un toque de BOOT
+
+  if (oledEcgOk && ahora - tEcg >= 40) {  // 25 cuadros/s: el barrido y la animación se ven fluidos
+    tEcg = ahora;
+    if (arranque)
+      dibujarVerificacion(oledEcg, vistaArranque(ahora, red));
+    else
+      dibujarEcg(oledEcg, barrido, vistaEcg(ahora));
+    oledEcg.display();
+  }
+
+  if (!oledOk || ahora - tPrincipal < 200) return;  // 5 cuadros/s bastan para números
+  tPrincipal = ahora;
+  if (arranque)
+    dibujarArranque(oled, vistaArranque(ahora, red));
+  else
+    dibujarPrincipal(oled, vistaPrincipal(ahora, red));
   oled.display();
 }
 
-void actualizarPantallas(uint32_t ahora) {
-  static uint32_t tPrincipal = 0, tEcg = 0, tCambio = 0;
-  static bool mostrandoEcg = false;
+// LED verde: encendido = todo funciona. Responden los cuatro sensores y las dos OLED, hay Wi-Fi y hora
+// NTP, y el broker MQTT está conectado (las lecturas llegan al backend). Apagado = algo falla, y el
+// monitor serie dice qué. No depende del paciente: sin dedo ni electrodos el equipo igual está bien.
+void atenderLed(uint32_t ahora) {
+#if PIN_LED_OK >= 0
+  static uint32_t tLed = 0;
+  static char antes[96] = "?";
+  if (ahora - tLed < 250) return;
+  tLed = ahora;
 
-  if (oledEcgOk) {  // hay OLED 128x32: el ECG va fijo ahí
-    mostrandoEcg = false;
-    if (ahora - tEcg >= 40) {  // 25 cuadros/s: el barrido se ve fluido
-      tEcg = ahora;
-      dibujarEcg(oledEcg, barrido, vistaEcg(ahora));
-      oledEcg.display();
-    }
-  } else {
-    // Una sola OLED: alterna signos y ECG. El ECG solo con electrodos puestos y nunca tapa una caída.
-    const bool alerta = msCaida != 0 && ahora - msCaida < 30000;
-    if (!sesion.monitoreando() || !ecg.resultado().electrodos || alerta) {
-      if (mostrandoEcg) tCambio = ahora;
-      mostrandoEcg = false;
-    } else if (ahora - tCambio >= (mostrandoEcg ? PANTALLA_ECG_MS : PANTALLA_SIGNOS_MS)) {
-      mostrandoEcg = !mostrandoEcg;
-      tCambio = ahora;
-    }
-  }
-
-  if (!oledOk) return;
   const EstadoRed red = redEstado();
-  if (enArranque(ahora, red)) {  // solo la pantalla principal: una OLED del ECG sigue con su trazo
-    mostrandoEcg = false;
-    tCambio = ahora;  // al terminar el arranque se empieza por los signos
-    if (ahora - tPrincipal >= 200) {
-      tPrincipal = ahora;
-      dibujarPantallaArranque(ahora, red);
-    }
-    return;
-  }
+  char falta[96] = "";
+  const auto revisar = [&falta](bool ok, const char* nombre) {
+    if (ok) return;
+    strlcat(falta, " ", sizeof falta);
+    strlcat(falta, nombre, sizeof falta);
+  };
+  revisar(oledOk, "OLED");
+  revisar(oledEcgOk || !kHayBus2, "OLED-ECG");
+  revisar(ppgOk, "MAX30102");
+  revisar(acelOk, "ADXL345");
+  revisar(tempPresente(), "DS18B20");
+  revisar(ecgModuloPresente(), "AD8232");
+  revisar(red.wifi == EstadoWifi::Conectado, "Wi-Fi");
+  revisar(red.horaSincronizada, "hora NTP");
+  revisar(red.broker == EstadoBroker::Conectado, "MQTT");
+  digitalWrite(PIN_LED_OK, falta[0] ? LOW : HIGH);
 
-  // ECG a 20 cuadros/s (cada cuadro de 128x64 tarda ~25 ms en el I2C); signos a 5 cuadros/s
-  if (ahora - tPrincipal < (mostrandoEcg ? 50u : 200u)) return;
-  tPrincipal = ahora;
-  const VistaPrincipal v = vistaPrincipal(ahora, red);
-  if (mostrandoEcg)
-    dibujarEcgCompleto(oled, barrido, v, vistaEcg(ahora));
+  if (strcmp(falta, antes) == 0) return;
+  strcpy(antes, falta);
+  if (falta[0])
+    Serial.printf("LED verde apagado: falta%s\n", falta);
   else
-    dibujarPrincipal(oled, v);
-  oled.display();
+    Serial.println("LED verde encendido: todo funciona");
+#else
+  (void)ahora;
+#endif
 }
 
 void atenderSerial(uint32_t ahora) {
@@ -471,5 +509,6 @@ void loop() {
   reintentarSensores(ahora);
   emitirTelemetria(ahora);
   actualizarPantallas(ahora);
+  atenderLed(ahora);
   atenderSerial(ahora);
 }

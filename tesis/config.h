@@ -36,7 +36,20 @@
 #define NTP_SERVIDOR_3 "time.cloudflare.com"
 #define ZONA_HORARIA "<-05>5"              // Perú (UTC-5), solo para el reloj de la OLED: el JSON va en UTC
 
-// ============================ Pines (ESP32-S3 Zero) ============================
+// ============================ Pines ============================
+#if defined(CONFIG_IDF_TARGET_ESP32)
+// ESP32 DevKit (ESP32-D0WD, USB por CH340). Los GPIO 6 a 11 son de la flash y los 34 a 39 solo entrada.
+#define PIN_I2C_SDA 26      // bus 0: MAX30102 (0x57), ADXL345 (0x53), OLED principal 128x64 (0x3C)
+#define PIN_I2C_SCL 33
+#define PIN_I2C2_SDA 13     // bus 1: OLED del ECG 128x32 (también 0x3C: por eso va en otro bus)
+#define PIN_I2C2_SCL 14     // no D12 (en alto al reiniciar, el ESP32 no arranca) ni D2 (su LED la deja en bajo)
+#define PIN_DS18B20 25      // datos (amarillo) + resistencia de 4,7 kΩ a 3V3
+#define PIN_ECG_SALIDA 34   // AD8232 OUTPUT (ADC1_CH6: funciona con el Wi-Fi encendido)
+#define PIN_ECG_LO_MENOS 35 // AD8232 LO-
+#define PIN_ECG_LO_MAS 32   // AD8232 LO+. SDN al aire o a 3V3: SDN a GND APAGA el AD8232
+#define PIN_LED_OK 27       // LED verde (ánodo, con resistencia de 220–330 Ω; cátodo a GND): todo funciona
+#else
+// ESP32-S3 Zero
 #define PIN_I2C_SDA 5       // bus 0: MAX30102 (0x57), ADXL345 (0x53), OLED principal 128x64 (0x3C)
 #define PIN_I2C_SCL 6
 #define PIN_I2C2_SDA 7      // bus 1: OLED del ECG 128x32 (0x3C)
@@ -45,6 +58,8 @@
 #define PIN_ECG_SALIDA 1    // AD8232 OUTPUT (ADC1: funciona con el Wi-Fi encendido)
 #define PIN_ECG_LO_MENOS 2  // AD8232 LO-
 #define PIN_ECG_LO_MAS 3    // AD8232 LO+. SDN al aire o a 3V3: SDN a GND APAGA el AD8232
+#define PIN_LED_OK -1       // sin LED verde
+#endif
 #define PIN_BOTON 0         // botón BOOT de la placa: en el arranque, sigue aunque falte un sensor
 
 // ============================ Sensores ============================
@@ -64,9 +79,5 @@
 // Colóquela en la axila: en la mano o al aire marca 24–33 °C, que no es la temperatura corporal.
 #define TEMP_MIN_CONTACTO 32.0f  // °C: por debajo, la sonda está al aire y no se envía
 #define TEMP_CORRECCION_C 0.0f   // °C a sumar: diferencia medida contra un termómetro clínico en el mismo sitio
-
-// Pantallas: con una sola OLED se alterna entre los signos y el ECG (solo con electrodos puestos)
-#define PANTALLA_SIGNOS_MS 10000
-#define PANTALLA_ECG_MS 6000
 
 #define ECG_FRECUENCIA_RED_HZ 60  // interferencia de la red eléctrica que filtra el notch (Perú: 60 Hz)

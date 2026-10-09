@@ -12,6 +12,9 @@ bool i2cPresente(TwoWire& bus, uint8_t direccion);
 // Libera un bus I2C trabado: si el ESP32 se reinició a mitad de una transmisión, un esclavo (p. ej.
 // la OLED) puede quedar sosteniendo SDA en bajo. Se llama antes de Wire.begin().
 void i2cLiberarBus(uint8_t sda, uint8_t scl);
+// En reposo, SDA y SCL se leen en alto (con la resistencia interna). Una línea en bajo es un cable a
+// GND, un módulo sin alimentación que la retiene o un cable en otro pin. Se usa antes de Wire.begin().
+bool i2cLineaEnAlto(uint8_t pin);
 void i2cEscanear(TwoWire& bus, char* buf, size_t tam);
 
 // ---------- MAX30102 (oxímetro, I2C 0x57) ----------

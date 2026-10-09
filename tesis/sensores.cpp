@@ -4,6 +4,7 @@
 #include <DallasTemperature.h>
 #include <MAX30105.h>
 #include <OneWire.h>
+#include <driver/gpio.h>
 
 #include <atomic>
 
@@ -67,18 +68,24 @@ uint32_t leidasEcg = 0;
 uint8_t pinEcgSalida, pinEcgLoMas, pinEcgLoMenos;
 std::atomic<bool> moduloEcg{false};
 
+// En el ESP32 clásico, los GPIO 34 a 39 son solo entrada y no tienen resistencias internas: pedírselas
+// no hace nada y ESP-IDF imprime un error en cada intento.
+bool tienePull(uint8_t pin) { return GPIO_IS_VALID_OUTPUT_GPIO(pin); }
+
 // ¿Hay un AD8232 manejando LO+ y LO-? Un módulo conectado fija su nivel (alto sin electrodos, bajo
 // con electrodos) y no le afectan las resistencias internas del ESP32. Un pin al aire las sigue:
 // si al cambiar de pull-down a pull-up cambia la lectura, no hay módulo (o falta un cable).
+// Solo se prueban los pines con resistencias (en el DevKit, LO+; LO- está en GPIO35).
 bool moduloResponde() {
-  pinMode(pinEcgLoMas, INPUT_PULLDOWN);
-  pinMode(pinEcgLoMenos, INPUT_PULLDOWN);
+  const bool mas = tienePull(pinEcgLoMas), menos = tienePull(pinEcgLoMenos);
+  if (mas) pinMode(pinEcgLoMas, INPUT_PULLDOWN);
+  if (menos) pinMode(pinEcgLoMenos, INPUT_PULLDOWN);
   delayMicroseconds(30);
   const int bajoMas = digitalRead(pinEcgLoMas), bajoMenos = digitalRead(pinEcgLoMenos);
-  pinMode(pinEcgLoMas, INPUT_PULLUP);
-  pinMode(pinEcgLoMenos, INPUT_PULLUP);
+  if (mas) pinMode(pinEcgLoMas, INPUT_PULLUP);
+  if (menos) pinMode(pinEcgLoMenos, INPUT_PULLUP);
   delayMicroseconds(30);
-  return bajoMas == digitalRead(pinEcgLoMas) && bajoMenos == digitalRead(pinEcgLoMenos);
+  return (!mas || bajoMas == digitalRead(pinEcgLoMas)) && (!menos || bajoMenos == digitalRead(pinEcgLoMenos));
 }
 
 void tareaEcg(void*) {
@@ -114,6 +121,12 @@ void tareaEcg(void*) {
 bool i2cPresente(TwoWire& bus, uint8_t direccion) {
   bus.beginTransmission(direccion);
   return bus.endTransmission() == 0;
+}
+
+bool i2cLineaEnAlto(uint8_t pin) {
+  pinMode(pin, INPUT_PULLUP);
+  delayMicroseconds(50);
+  return digitalRead(pin) == HIGH;
 }
 
 void i2cLiberarBus(uint8_t sda, uint8_t scl) {
@@ -272,9 +285,10 @@ void ecgIniciar(uint8_t pinSalida, uint8_t pinLoMas, uint8_t pinLoMenos) {
   pinEcgSalida = pinSalida;
   pinEcgLoMas = pinLoMas;
   pinEcgLoMenos = pinLoMenos;
-  // Pull-up: si se suelta el cable de LO+/LO-, se ve como "electrodos desconectados" y no como ruido
-  pinMode(pinLoMas, INPUT_PULLUP);
-  pinMode(pinLoMenos, INPUT_PULLUP);
+  // Pull-up: si se suelta el cable de LO+/LO-, se ve como "electrodos desconectados" y no como ruido.
+  // Un pin sin resistencias internas (GPIO35 en el DevKit) necesita una de 10 kΩ externa a 3V3.
+  pinMode(pinLoMas, tienePull(pinLoMas) ? INPUT_PULLUP : INPUT);
+  pinMode(pinLoMenos, tienePull(pinLoMenos) ? INPUT_PULLUP : INPUT);
   pinMode(pinSalida, INPUT);
   analogReadResolution(12);
   analogSetPinAttenuation(pinSalida, ADC_11db);  // 0–3,1 V: la salida del AD8232 reposa en ~1,65 V

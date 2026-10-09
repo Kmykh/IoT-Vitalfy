@@ -47,30 +47,6 @@ const char* const kCorazonVacio[] = {
     "..#.#..",
     "...#...",
 };
-const char* const kCorazonGrandeLleno[] = {
-    ".###...###.",
-    "#####.#####",
-    "###########",
-    "###########",
-    "###########",
-    ".#########.",
-    "..#######..",
-    "...#####...",
-    "....###....",
-    ".....#.....",
-};
-const char* const kCorazonGrandeVacio[] = {
-    ".###...###.",
-    "#...#.#...#",
-    "#....#....#",
-    "#.........#",
-    "#.........#",
-    ".#.......#.",
-    "..#.....#..",
-    "...#...#...",
-    "....#.#....",
-    ".....#.....",
-};
 const char* const kListo[] = {  // ✓
     "......#",
     ".....##",
@@ -424,6 +400,60 @@ void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v) {
   textoCentrado(g, 64, 57, pie);
 }
 
+// ---------- Verificación (OLED 128x32 durante el arranque) ----------
+namespace {
+// Un latido estilizado cada 64 px (P, QRS y T): columna y desplazamiento vertical de cada vértice
+const int8_t kLatido[][2] = {{0, 0},  {6, 0},  {9, -2},  {12, 0}, {16, 0}, {17, 2}, {19, -10},
+                             {21, 6}, {23, 0}, {30, 0}, {34, -3}, {38, 0}, {64, 0}};
+
+int alturaLatido(int x) {
+  const int u = x % 64;
+  for (size_t i = 1; i < sizeof kLatido / sizeof kLatido[0]; i++) {
+    if (u > kLatido[i][0]) continue;
+    const int x0 = kLatido[i - 1][0], y0 = kLatido[i - 1][1], x1 = kLatido[i][0], y1 = kLatido[i][1];
+    return y0 + (y1 - y0) * (u - x0) / (x1 - x0);
+  }
+  return 0;
+}
+}  // namespace
+
+void dibujarVerificacion(Adafruit_GFX& g, const VistaArranque& v) {
+  g.fillScreen(kOff);
+  g.cp437(true);
+  g.setTextWrap(false);
+
+  // Los seis chequeos de la OLED principal; arriba, el primero que falta
+  const bool listos[] = {v.ppg, v.acelerometro, v.temperatura, v.ecgModulo && v.electrodos, v.wifi, v.broker == 2};
+  int n = 0;
+  for (const bool listo : listos) n += listo;
+  const char* paso = !v.ppg            ? "Falta sensor SpO2"
+                     : !v.acelerometro ? "Falta acelerometro"
+                     : !v.temperatura  ? "Falta sonda temp."
+                     : !v.ecgModulo    ? "Falta modulo ECG"
+                     : !v.electrodos   ? "Conecte electrodos"
+                     : !v.wifi         ? "Buscando Wi-Fi"
+                     : v.broker == 3   ? "MQTT: clave?"
+                     : v.broker != 2   ? "Conectando MQTT"
+                                       : "Todo listo";
+  texto(g, 0, 0, paso);
+  char cuenta[6];
+  snprintf(cuenta, sizeof cuenta, "%d/6", n);
+  textoDerecha(g, 127, 0, cuenta);
+
+  // Latido que recorre la pantalla como en un monitor, sobre una línea de base punteada. La cabeza
+  // sigue de largo hasta que la estela sale por la derecha.
+  const int base = 18, estela = 80;
+  const int cabeza = (int)((v.ms / 12) % (128 + estela));
+  for (int x = 0; x < 128; x += 4) g.drawPixel(x, base, kOn);
+  for (int x = cabeza - estela + 1; x <= cabeza && x < 128; x++)
+    if (x >= 1) g.drawLine(x - 1, base + alturaLatido(x - 1), x, base + alturaLatido(x), kOn);
+  if (cabeza < 127) g.fillRect(cabeza, base + alturaLatido(cabeza) - 1, 2, 2, kOn);
+
+  // Progreso de los chequeos
+  g.drawRect(0, 28, 128, 4, kOn);
+  g.fillRect(1, 29, 126 * n / 6, 2, kOn);
+}
+
 // ---------- ECG ----------
 BarridoEcg::BarridoEcg(int muestrasPorColumna, int ancho)
     : porColumna_(muestrasPorColumna < 1 ? 1 : muestrasPorColumna), ancho_(kAnchoMax) {
@@ -529,31 +559,4 @@ void dibujarEcg(Adafruit_GFX& g, BarridoEcg& b, const VistaEcg& v) {
     return;
   }
   dibujarTrazo(g, b, 0, 32);
-}
-
-void dibujarEcgCompleto(Adafruit_GFX& g, BarridoEcg& b, const VistaPrincipal& p, const VistaEcg& v) {
-  g.fillScreen(kOff);
-  g.cp437(true);
-  g.setTextWrap(false);
-  barraEstado(g, p);
-
-  // Encabezado: ECG, corazón que late con cada QRS y la FC calculada de los QRS
-  texto(g, 2, kYEtiquetas, "ECG");
-  char s[16];
-  if (v.electrodos && v.fc > 0)
-    snprintf(s, sizeof s, "%d lpm", v.fc);
-  else
-    strcpy(s, "-- lpm");
-  textoDerecha(g, 127, kYEtiquetas, s);
-  icono(g, 127 - anchoTexto(s) - 15, 7, v.pulso ? kCorazonGrandeLleno : kCorazonGrandeVacio);
-
-  if (!v.electrodos) {
-    if ((v.ms / 700) % 2) {
-      textoCentrado(g, 64, 28, "Electrodos");
-      textoCentrado(g, 64, 38, "desconectados");
-    }
-    g.drawFastHLine(0, 60, 128, kOn);
-    return;
-  }
-  dibujarTrazo(g, b, 17, 47);
 }

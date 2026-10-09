@@ -1,7 +1,7 @@
 // pantallas.h — Diseño de las OLED (se dibuja sobre Adafruit_GFX, sin tocar el hardware).
 //
-// Con una sola OLED (128x64), el firmware alterna cada pocos segundos entre la pantalla de signos y
-// el ECG a pantalla completa (dibujarEcgCompleto). Si además hay una OLED 128x32, el ECG va fijo ahí.
+// La OLED principal muestra el arranque y después los signos. La OLED 128x32 muestra una
+// verificación animada durante el arranque y después el ECG; la principal nunca muestra el ECG.
 //
 //   OLED principal 128x64                     OLED ECG 128x32
 //   ┌──────────────────────────────┐          ┌───────────────────────┬──────┐
@@ -12,6 +12,13 @@
 //   ├───────────────┴──────────────┤          Barrido tipo monitor: el trazo se
 //   │ 🌡 36.8°C              Reposo │          escribe de izquierda a derecha y
 //   └──────────────────────────────┘          borra delante del cursor.
+//
+//   OLED ECG 128x32 durante el arranque (verificación)
+//   ┌──────────────────────────────┐
+//   │ Conectando MQTT          5/6 │          Arriba, lo primero que falta; el latido recorre
+//   │ · · · ·_/\_·|\/·_^_· ●       │          la pantalla mientras tanto y la barra cuenta
+//   │ ███████████████████████░░░░░ │          los chequeos listos.
+//   └──────────────────────────────┘
 //
 // Las mismas funciones dibujan en la SSD1306 (firmware) y en un lienzo en memoria
 // (pruebas/vista_previa.cpp genera imágenes PNG de cada pantalla).
@@ -75,6 +82,9 @@ struct VistaArranque {
   uint32_t ms = 0;           // millis() para la animación de "conectando"
 };
 void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v);
+// La misma verificación en la OLED 128x32: qué falta ahora, cuántos de los seis chequeos están
+// listos y un latido que recorre la pantalla mientras tanto.
+void dibujarVerificacion(Adafruit_GFX& g, const VistaArranque& v);
 
 // Trazo del ECG en modo barrido: guarda mínimo, máximo, primer y último valor por columna,
 // así el QRS (más angosto que una columna) no se pierde al comprimir el tiempo.
@@ -85,7 +95,7 @@ class BarridoEcg {
 
   // 250 Hz / 8 = 31 col/s: 128 columnas son ~4 s en pantalla
   explicit BarridoEcg(int muestrasPorColumna = 8, int ancho = kAnchoMax);
-  void fijarAncho(int ancho);    // 128 en pantalla completa, 97 en la OLED 128x32 (deja el panel)
+  void fijarAncho(int ancho);    // 97 en la OLED 128x32 (deja el panel de la FC)
   int ancho() const { return ancho_; }
   void agregar(float v);
   void limpiar();
@@ -116,5 +126,3 @@ struct VistaEcg {
   uint32_t ms = 0;
 };
 void dibujarEcg(Adafruit_GFX& g, BarridoEcg& b, const VistaEcg& v);  // OLED 128x32 dedicada
-// ECG en la OLED principal (128x64): barra de estado, FC del ECG y trazo de 128 columnas
-void dibujarEcgCompleto(Adafruit_GFX& g, BarridoEcg& b, const VistaPrincipal& p, const VistaEcg& v);

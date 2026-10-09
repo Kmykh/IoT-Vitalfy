@@ -156,27 +156,24 @@ int main() {
   dibujarEcg(ecg, barrido, ve);
   guardar(ecg, "10_ecg");
 
-  // Una sola OLED: el ECG ocupa la pantalla principal (128 columnas, ~4 s)
-  BarridoEcg completo(8, BarridoEcg::kAnchoMax);
-  ProcesadorEcg p2;
-  GeneradorEcg gen2;
-  gen2.fc = 72;
-  for (int i = 0; i < 250 * 6; i++) {
-    bool latido = false;
-    completo.agregar(p2.procesar(gen2.muestra(), true, &latido));
-  }
-  for (int i = 0; i < 30; i++) completo.actualizarEscala();
-  VistaEcg vc;
-  vc.electrodos = true;
-  vc.fc = p2.resultado().fc;
-  vc.pulso = true;
-  dibujarEcgCompleto(principal, completo, base(), vc);
-  guardar(principal, "12_ecg_pantalla_completa");
-
   ve.electrodos = false;
   ve.ms = 700;
   barrido.limpiar();
   dibujarEcg(ecg, barrido, ve);
   guardar(ecg, "11_ecg_sin_electrodos");
+
+  // OLED del ECG durante el arranque: verificación animada
+  VistaArranque va;
+  va.ppg = va.acelerometro = va.temperatura = va.ecgModulo = va.wifi = true;
+  va.broker = 1;
+  va.ms = 1150;
+  dibujarVerificacion(ecg, va);
+  guardar(ecg, "12_ecg_verificando");
+
+  va.electrodos = true;
+  va.broker = 2;
+  va.ms = 1700;
+  dibujarVerificacion(ecg, va);
+  guardar(ecg, "13_ecg_verificacion_lista");
   return 0;
 }
