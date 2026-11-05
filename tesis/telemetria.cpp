@@ -30,6 +30,7 @@ size_t construirJsonTelemetria(const char* dispositivo, const Lectura& l, char* 
   agregar(snprintf(buf, tam, "{\"dispositivo\":\"%s\",\"ts\":\"%s\",\"seq\":%lu", dispositivo, ts,
                    (unsigned long)l.seq));
   if (n < tam && l.fc >= 0) agregar(snprintf(buf + n, tam - n, ",\"fc\":%d", l.fc));
+  if (n < tam && l.fr >= 0) agregar(snprintf(buf + n, tam - n, ",\"fr\":%d", l.fr));
   if (n < tam && l.spo2 >= 0) agregar(snprintf(buf + n, tam - n, ",\"spo2\":%d", l.spo2));
   if (n < tam && l.tempDecimas != kSinTemperatura) {
     const int t = l.tempDecimas;

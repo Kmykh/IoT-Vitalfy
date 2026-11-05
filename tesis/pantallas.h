@@ -10,8 +10,18 @@
 //   │ FC ♥     ECG  │ SpO2       % │          │                    ▏  │  lpm │
 //   │      72       │      98      │          └───────────────────────┴──────┘
 //   ├───────────────┴──────────────┤          Barrido tipo monitor: el trazo se
-//   │ 🌡 36.8°C              Reposo │          escribe de izquierda a derecha y
-//   └──────────────────────────────┘          borra delante del cursor.
+//   │ 🌡 36.8°C            Normal │          escribe de izquierda a derecha y
+//   │                   FR 16/min │          borra delante del cursor.
+//   └──────────────────────────────┘
+//
+//   Sin vincular: el QR para la app de enfermería (y "Emparejando..." mientras registra al paciente)
+//   ┌──────────┬───────────────────┐
+//   │ ▓▓ QR ▓▓ │ ▂▄▆█ ☁            │
+//   │ ▓▓▓▓▓▓▓▓ │ Escanee con       │
+//   │ ▓▓▓▓▓▓▓▓ │ la app            │
+//   │ ▓▓▓▓▓▓▓▓ │ vence 9:32        │
+//   │ ▓▓▓▓▓▓▓▓ │ ESP32-001         │
+//   └──────────┴───────────────────┘
 //
 //   OLED ECG 128x32 durante el arranque (verificación)
 //   ┌──────────────────────────────┐
@@ -27,6 +37,7 @@
 #include <stdint.h>
 
 #include "ppg.h"
+#include "respiracion.h"
 #include "temperatura.h"
 
 class Adafruit_GFX;
@@ -52,9 +63,16 @@ struct VistaPrincipal {
   RangoTemperatura rangoTemp = RangoTemperatura::Normal;
   bool ecgInstalado = true;  // el módulo AD8232 responde
   bool electrodos = false;   // electrodos del ECG puestos
-  bool acelerometro = false; // ADXL345 presente
+  bool acelerometro = false; // MPU6050 (o ADXL345) presente
   bool movimiento = false;
   bool alertaCaida = false;
+  int fr = -1;               // respiraciones por minuto (-1 = sin dato)
+  EstadoRespiracion estadoFr = EstadoRespiracion::Midiendo;
+
+  // Paciente vinculado (comando "vinculado" del backend): solo cama e iniciales
+  const char* cama = "";
+  const char* iniciales = "";
+  const char* aviso = "";    // aviso del backend (repetir-medicion), "" = ninguno
 
   // Sesión: sin paciente se muestra qué falta conectar (ver sesion.h)
   bool sesionActiva = false;
@@ -67,6 +85,22 @@ struct VistaPrincipal {
 };
 
 void dibujarPrincipal(Adafruit_GFX& g, const VistaPrincipal& v);
+
+// Sin vincular a un paciente: el QR que escanea la enfermera, o "Emparejando..." mientras registra al
+// paciente (docs/vinculacion-qr.md del backend). El QR se dibuja oscuro sobre claro, a 2 px por módulo,
+// en un cuadro claro de 64x64 (su margen de silencio) y a 4 px del borde de arriba: así la franja sin
+// píxeles de las OLED bicolor (entre las filas 15 y 16) no corta sus patrones de posición.
+enum class PantallaVinculo : uint8_t { Qr, Solicitando, Vencido, Emparejando };
+struct VistaVinculacion {
+  PantallaVinculo pantalla = PantallaVinculo::Solicitando;
+  const char* qr = "";
+  int segundosRestantes = -1;  // hasta que vence el QR (-1 = sin hora NTP)
+  const char* codigo = "";     // código del dispositivo
+  int8_t wifiBarras = -1;
+  uint8_t broker = 0;          // como en VistaPrincipal
+  uint32_t ms = 0;
+};
+void dibujarVinculacion(Adafruit_GFX& g, const VistaVinculacion& v);
 
 // Pantalla de arranque: chequeo del hardware y de la conexión. No sigue mientras falte un sensor o
 // los electrodos del ECG (el botón BOOT permite seguir igual) y espera al broker hasta 25 s.

@@ -14,7 +14,11 @@ if ! echo 'int main(){}' | "$CXX" -x c++ - -o /dev/null >/dev/null 2>&1; then
   fi
 fi
 
+CC="${CC:-$(dirname "$CXX")/clang}"
+[ -x "$CC" ] || CC=cc
 mkdir -p salida
+"$CC" -std=c99 -O2 -Wall -c ../qrcodegen.c -o salida/qrcodegen.o  # generador de QR (C, de Nayuki)
 "$CXX" -std=c++17 -O2 -Wall -Wextra -I.. \
-  ../ppg.cpp ../ecg.cpp ../caidas.cpp ../telemetria.cpp ../temperatura.cpp ../sesion.cpp pruebas.cpp -o salida/pruebas
+  ../ppg.cpp ../ecg.cpp ../caidas.cpp ../respiracion.cpp ../telemetria.cpp ../temperatura.cpp ../sesion.cpp \
+  ../vinculacion.cpp salida/qrcodegen.o pruebas.cpp -o salida/pruebas
 ./salida/pruebas

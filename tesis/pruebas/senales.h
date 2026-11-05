@@ -104,3 +104,53 @@ struct GeneradorEcg {
     return (int)v;
   }
 };
+
+// Acelerómetro sobre el tórax: la respiración inclina el wearable unos grados (la gravedad cambia de
+// eje), con ritmo irregular, inspiración más corta que la espiración, el latido (balistocardiograma),
+// ruido del sensor y, si se pide, movimiento del paciente.
+struct GeneradorRespiracion {
+  double fs = 100;
+  double rpm = 15;
+  double variabilidad = 0;     // variación uniforme ± de cada ciclo (fracción)
+  double inclinacion = 0.02;   // rad de amplitud (~1,1°: ~20 mg de cambio de la gravedad)
+  double inspiracion = 0.5;    // fracción del ciclo que dura la inspiración (0,5 = senoidal)
+  double ruido = 0.003;        // g RMS por eje (MPU6050 a 100 Hz)
+  double latido = 0;           // g de amplitud del balistocardiograma
+  double fcLatido = 72;        // lpm
+  double movimiento = 0;       // g de amplitud de un movimiento tipo caminata (1,8 Hz) + sacudones
+  double gx = 0, gy = 0, gz = 1;      // gravedad en reposo (unitaria): acostado boca arriba, z hacia arriba
+  double ex = 1, ey = 0, ez = 0;      // eje de giro de la respiración (perpendicular a la gravedad)
+  Aleatorio rnd{17};
+
+  double t = 0, fase = 0, periodo = 0;
+
+  // Onda respiratoria en [-1, 1]: sube durante la inspiración y baja durante la espiración
+  double onda(double f) const {
+    if (inspiracion == 0.5) return -cos(2 * M_PI * f);
+    return f < inspiracion ? -cos(M_PI * f / inspiracion) : cos(M_PI * (f - inspiracion) / (1 - inspiracion));
+  }
+
+  void muestra(float& ax, float& ay, float& az) {
+    if (periodo == 0) periodo = 60.0 / rpm;
+    fase += 1.0 / (fs * periodo);
+    if (fase >= 1) {
+      fase -= 1;
+      periodo = 60.0 / rpm * (1 + variabilidad * (2 * rnd.uniforme() - 1));
+    }
+    const double th = inclinacion * onda(fase);
+    // Rodrigues con el eje perpendicular a la gravedad: g·cosθ + (e×g)·sinθ
+    const double cx = ey * gz - ez * gy, cy = ez * gx - ex * gz, cz = ex * gy - ey * gx;
+    double x = gx * cos(th) + cx * sin(th), y = gy * cos(th) + cy * sin(th), z = gz * cos(th) + cz * sin(th);
+    const double l = latido * sin(2 * M_PI * fcLatido / 60.0 * t);  // a lo largo del cuerpo (aquí, el eje y)
+    y += l;
+    if (movimiento > 0) {
+      z += movimiento * sin(2 * M_PI * 1.8 * t);
+      x += 0.4 * movimiento * sin(2 * M_PI * 0.9 * t + 1);
+      if (rnd.uniforme() < 0.01) y += 2 * movimiento * rnd.normal();
+    }
+    ax = (float)(x + ruido * rnd.normal());
+    ay = (float)(y + ruido * rnd.normal());
+    az = (float)(z + ruido * rnd.normal());
+    t += 1.0 / fs;
+  }
+};

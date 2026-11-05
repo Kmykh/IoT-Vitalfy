@@ -5,7 +5,10 @@
 //   filas  0–7   barra de estado (Wi-Fi, broker, pendientes, hora)
 //   filas  8–14  etiquetas (FC / SpO2) o identidad del dispositivo en espera
 //   filas 16–46  valores grandes
-//   filas 47–63  temperatura y actividad (o la alerta de caída)
+//   filas 47–63  temperatura (izquierda), su rango y la FR (derecha), o la alerta de caída
+//
+// Sin vincular, la pantalla es otra (dibujarVinculacion): el QR a la izquierda y las indicaciones a la
+// derecha.
 #include "pantallas.h"
 
 #include <Adafruit_GFX.h>
@@ -14,6 +17,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "vinculacion.h"
 
 namespace {
 
@@ -144,37 +149,39 @@ void lineaPunteada(Adafruit_GFX& g, int x, int y0, int y1) {
   for (int y = y0; y <= y1; y += 2) g.drawPixel(x, y, kOn);
 }
 
-// ---------- Barra de estado: Wi-Fi, broker MQTT, pendientes y hora ----------
-void barraEstado(Adafruit_GFX& g, const VistaPrincipal& v) {
-  const bool parpadeo = (v.ms / 400) % 2;
-
-  // Wi-Fi: 4 barras (filas 0–6). Buscando red: las barras se animan.
+// Wi-Fi (4 barras, filas 0–6; buscando red: se animan) y broker MQTT (nube llena = conectado; vacía
+// parpadeando = intentando; "!" = credenciales rechazadas), desde la columna x0
+void iconosRed(Adafruit_GFX& g, int x0, int8_t wifiBarras, uint8_t broker, uint32_t ms) {
+  const bool parpadeo = (ms / 400) % 2;
   const int alturas[4] = {2, 3, 5, 7};
-  const int nivel = v.wifiBarras < 0 ? (int)((v.ms / 250) % 5) : v.wifiBarras;
+  const int nivel = wifiBarras < 0 ? (int)((ms / 250) % 5) : wifiBarras;
   for (int i = 0; i < 4; i++) {
-    const int x = i * 3;
+    const int x = x0 + i * 3;
     if (i < nivel)
       g.fillRect(x, 7 - alturas[i], 2, alturas[i], kOn);
     else
       g.drawFastHLine(x, 6, 2, kOn);
   }
-
-  // Broker MQTT: nube llena = conectado; vacía parpadeando = intentando; "!" = credenciales
-  switch (v.broker) {
+  switch (broker) {
     case 2:
-      icono(g, 14, 1, kNubeLlena);
+      icono(g, x0 + 14, 1, kNubeLlena);
       break;
     case 1:
-      if (parpadeo) icono(g, 14, 1, kNubeVacia);
+      if (parpadeo) icono(g, x0 + 14, 1, kNubeVacia);
       break;
     case 3:
-      icono(g, 14, 1, kNubeVacia);
-      if (parpadeo) texto(g, 27, 0, "!");
+      icono(g, x0 + 14, 1, kNubeVacia);
+      if (parpadeo) texto(g, x0 + 27, 0, "!");
       break;
     default:
-      icono(g, 14, 1, kNubeVacia);
+      icono(g, x0 + 14, 1, kNubeVacia);
       break;
   }
+}
+
+// ---------- Barra de estado: Wi-Fi, broker MQTT, pendientes y hora ----------
+void barraEstado(Adafruit_GFX& g, const VistaPrincipal& v) {
+  iconosRed(g, 0, v.wifiBarras, v.broker, v.ms);
 
   // Lecturas guardadas sin enviar
   if (v.pendientes > 0) {
@@ -194,25 +201,51 @@ void barraEstado(Adafruit_GFX& g, const VistaPrincipal& v) {
   textoDerecha(g, 127, 0, hora);
 }
 
-// ---------- Fila inferior: temperatura y actividad (o alerta de caída) ----------
+// ---------- Fila inferior: temperatura a la izquierda; su rango y la FR a la derecha ----------
+// (o, a pantalla completa, la alerta de caída o un aviso del backend)
+void textoFr(const VistaPrincipal& v, char* s, size_t tam) {
+  s[0] = 0;
+  if (!v.acelerometro) return;
+  if (v.fr > 0) {
+    snprintf(s, tam, "FR %d/min", v.fr);
+    return;
+  }
+  switch (v.estadoFr) {
+    case EstadoRespiracion::Movimiento:
+      snprintf(s, tam, "FR: quieto");  // pide quietud: moviéndose no se puede contar
+      break;
+    case EstadoRespiracion::SinSenal:
+      snprintf(s, tam, "FR --");
+      break;
+    default:
+      snprintf(s, tam, "FR midiendo");
+  }
+}
+
 void filaInferior(Adafruit_GFX& g, const VistaPrincipal& v) {
-  if (v.alertaCaida) {
+  if (v.alertaCaida || v.aviso[0]) {
     const bool invertido = (v.ms / 500) % 2 == 0;
     if (invertido) g.fillRect(0, kYLineaInferior + 1, 128, 64 - kYLineaInferior - 1, kOn);
     char msg[24];
-    snprintf(msg, sizeof msg, "%cCAIDA DETECTADA!", kAbreExclamacion);
+    if (v.alertaCaida)
+      snprintf(msg, sizeof msg, "%cCAIDA DETECTADA!", kAbreExclamacion);
+    else
+      snprintf(msg, sizeof msg, "%s", v.aviso);
     textoCentrado(g, 64, 52, msg, invertido ? kOff : kOn);
     return;
   }
 
   g.drawFastHLine(0, kYLineaInferior, 128, kOn);
+  char fr[24];
+  textoFr(v, fr, sizeof fr);
+  textoDerecha(g, 127, 57, fr);
   icono(g, 1, 53, kTermometro);
   switch (v.estadoTemp) {
     case EstadoTemperatura::SinSonda:
-      texto(g, 8, 53, "Sin sonda temp.");
+      texto(g, 8, 49, "Sin sonda temp.");
       return;
     case EstadoTemperatura::SinContacto:  // al aire: el número sería la temperatura ambiente
-      texto(g, 8, 53, "Coloque la sonda");
+      texto(g, 8, 49, "Coloque la sonda");
       return;
     default:
       break;
@@ -227,9 +260,9 @@ void filaInferior(Adafruit_GFX& g, const VistaPrincipal& v) {
   const char unidad[3] = {kGrado, 'C', 0};
   texto(g, x, 50, unidad);
   if (v.estadoTemp == EstadoTemperatura::Estabilizando)
-    textoDerecha(g, 127, 53, (v.ms / 500) % 2 ? "midiendo" : "midiendo.");
+    textoDerecha(g, 127, 49, (v.ms / 500) % 2 ? "midiendo" : "midiendo.");
   else
-    textoDerecha(g, 127, 53, EvaluadorTemperatura::nombre(v.rangoTemp));
+    textoDerecha(g, 127, 49, EvaluadorTemperatura::nombre(v.rangoTemp));
 }
 
 // Corazón grande con una línea de pulso calada (pantalla de espera)
@@ -250,6 +283,8 @@ void pantallaEspera(Adafruit_GFX& g, const VistaPrincipal& v) {
   char info[22];  // 21 caracteres de 6 px
   if (v.avisoRed)
     snprintf(info, sizeof info, "%s", v.red);
+  else if (v.cama[0])  // vinculado: la cama y las iniciales del paciente
+    snprintf(info, sizeof info, "%s  %s", v.cama, v.iniciales);
   else
     snprintf(info, sizeof info, "%s %s", v.codigo, v.red);
   textoCentrado(g, 64, kYEtiquetas, info);
@@ -278,7 +313,13 @@ void filaConexion(Adafruit_GFX& g, int y, const char* nombre, Conexion c, const 
 }
 
 void pantallaConexion(Adafruit_GFX& g, const VistaPrincipal& v) {
-  textoCentrado(g, 64, kYEtiquetas, "Conecte al paciente");
+  if (v.cama[0]) {  // vinculado: a qué paciente hay que conectarlo
+    char titulo[22];
+    snprintf(titulo, sizeof titulo, "%s  %s", v.cama, v.iniciales);
+    textoCentrado(g, 64, kYEtiquetas, titulo);
+  } else {
+    textoCentrado(g, 64, kYEtiquetas, "Conecte al paciente");
+  }
   const bool dedo = v.ppg != EstadoPpg::SinDedo;
   filaConexion(g, 19, "SpO2", !v.sensorPpg ? Conexion::NoInstalado : (dedo ? Conexion::Lista : Conexion::Pendiente),
                "coloque el dedo");
@@ -350,6 +391,107 @@ void dibujarPrincipal(Adafruit_GFX& g, const VistaPrincipal& v) {
   else
     pantallaEspera(g, v);
   filaInferior(g, v);
+}
+
+namespace {
+
+// El QR se genera solo cuando cambia el texto (la pantalla se redibuja 5 veces por segundo)
+struct CacheQr {
+  char texto[72] = "";
+  uint8_t qr[kQrTamBuffer];
+  int lado = 0;
+} cacheQr;
+
+int qrDe(const char* texto) {
+  if (strcmp(cacheQr.texto, texto) != 0) {
+    snprintf(cacheQr.texto, sizeof cacheQr.texto, "%s", texto);
+    cacheQr.lado = generarQr(texto, cacheQr.qr);
+  }
+  return cacheQr.lado;
+}
+
+void textoGrandeCentrado(Adafruit_GFX& g, int cx, int base, const char* s) {
+  g.setFont(&FreeSansBold9pt7b);
+  g.setTextSize(1);
+  g.setTextColor(kOn);
+  int16_t x1, y1;
+  uint16_t ancho, alto;
+  g.getTextBounds(s, 0, base, &x1, &y1, &ancho, &alto);
+  g.setCursor(cx - (int)ancho / 2 - x1, base);
+  g.print(s);
+}
+
+const char* puntos(uint32_t ms) {
+  static const char* const kPuntos[] = {"", ".", "..", "..."};
+  return kPuntos[(ms / 400) % 4];
+}
+
+}  // namespace
+
+void dibujarVinculacion(Adafruit_GFX& g, const VistaVinculacion& v) {
+  g.fillScreen(kOff);
+  g.cp437(true);
+  g.setTextWrap(false);
+
+  const int lado = v.pantalla == PantallaVinculo::Qr ? qrDe(v.qr) : 0;
+  if (lado > 0 && 2 * lado <= 64) {
+    // QR oscuro sobre un cuadro claro de 64x64: el borde claro es su margen de silencio.
+    // En las OLED bicolor hay una franja sin píxeles entre la fila 15 (amarilla) y la 16 (azul). Si cae
+    // dentro de los patrones de posición de arriba, el QR no se lee. A 4 px del borde, la franja queda justo
+    // encima de la última fila oscura de esos patrones (la 6) y solo la engrosa: se lee igual (comprobado
+    // con un lector de QR sobre la imagen con la franja simulada).
+    g.fillRect(0, 0, 64, 64, kOn);
+    const int ox = (64 - 2 * lado) / 2, oy = 16 - 2 * 6;
+    for (int y = 0; y < lado; y++)
+      for (int x = 0; x < lado; x++)
+        if (moduloQr(cacheQr.qr, x, y)) g.fillRect(ox + 2 * x, oy + 2 * y, 2, 2, kOff);
+
+    // A la derecha: red y código del sensor en el encabezado; debajo, qué hacer y cuánto dura el QR
+    iconosRed(g, 68, v.wifiBarras, v.broker, v.ms);
+    char codigo[11];
+    snprintf(codigo, sizeof codigo, "%s", v.codigo);
+    texto(g, 68, 8, codigo);
+    texto(g, 68, 19, "Escanee");
+    texto(g, 68, 28, "para");
+    texto(g, 68, 37, "vincular");
+    char vence[12];
+    if (v.segundosRestantes >= 0)
+      snprintf(vence, sizeof vence, "vence %d:%02d", v.segundosRestantes / 60 % 100, v.segundosRestantes % 60);
+    else
+      snprintf(vence, sizeof vence, "vence --:--");
+    texto(g, 68, 52, vence);
+    return;
+  }
+
+  // Sin QR que mostrar: a lo ancho, con la red y el código del sensor arriba
+  iconosRed(g, 0, v.wifiBarras, v.broker, v.ms);
+  textoCentrado(g, 64, 8, v.codigo);
+  char linea[24];
+  switch (v.pantalla) {
+    case PantallaVinculo::Emparejando:
+      textoGrandeCentrado(g, 64, 34, "Emparejando");
+      textoCentrado(g, 64, 48, "Registrando al");
+      snprintf(linea, sizeof linea, "paciente%s", puntos(v.ms));
+      texto(g, 64 - anchoTexto("paciente...") / 2, 57, linea);
+      return;
+    case PantallaVinculo::Vencido:
+      textoCentrado(g, 64, 22, "Codigo QR vencido");
+      snprintf(linea, sizeof linea, "pidiendo otro%s", puntos(v.ms));
+      texto(g, 64 - anchoTexto("pidiendo otro...") / 2, 34, linea);
+      textoCentrado(g, 64, 52, "BOOT: pedir otro");
+      return;
+    default:
+      if (v.broker == 2) {
+        textoCentrado(g, 64, 22, "Pidiendo el QR");
+        textoCentrado(g, 64, 31, "para vincular");
+        texto(g, 64 - anchoTexto("...") / 2, 40, puntos(v.ms));
+        textoCentrado(g, 64, 54, "BOOT: pedir otro");
+      } else {
+        textoCentrado(g, 64, 26, "Sin servidor");
+        snprintf(linea, sizeof linea, "conectando%s", puntos(v.ms));
+        texto(g, 64 - anchoTexto("conectando...") / 2, 38, linea);
+      }
+  }
 }
 
 void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v) {

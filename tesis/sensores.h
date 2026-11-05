@@ -1,4 +1,4 @@
-// sensores.h — Acceso al hardware: MAX30102, ADXL345, DS18B20 y AD8232.
+// sensores.h — Acceso al hardware: MAX30102, MPU6050 (o ADXL345), DS18B20 y AD8232.
 // Los algoritmos están aparte (ppg, ecg, caidas); aquí solo se leen los datos crudos.
 #pragma once
 
@@ -25,11 +25,15 @@ bool ppgIniciar(TwoWire& bus, uint8_t corrienteLed, int rangoAdc);
 // *perdidas = muestras que el sensor descartó por desborde desde la última lectura.
 int ppgLeer(uint32_t* ir, uint32_t* rojo, int max, uint8_t* perdidas);
 
-// ---------- ADXL345 (acelerómetro, I2C 0x53) ----------
-// ±16 g en resolución completa (un golpe de caída supera los 2 g del modo anterior), 100 Hz,
-// FIFO en modo stream: no se pierden muestras aunque el loop tarde.
+// ---------- Acelerómetro: MPU6050 (I2C 0x68/0x69) o ADXL345 (0x53) ----------
+// El de la placa es el MPU6050: caídas y frecuencia respiratoria (respiracion.h). Si no está, se usa un
+// ADXL345 (el de la protoboard anterior). Los dos a ±16 g (un golpe de caída supera los 2 g) y 100 Hz,
+// con FIFO: no se pierden muestras aunque el loop tarde. En el MPU6050 los giroscopios quedan apagados.
+enum class ModeloAcel : uint8_t { Ninguno, Mpu6050, Adxl345 };
 bool acelIniciar(TwoWire& bus);
 int acelLeer(float* ax, float* ay, float* az, int max);  // en g
+ModeloAcel acelModelo();
+const char* acelNombre();  // "MPU6050", "ADXL345" o "acelerometro" (para el monitor serie)
 
 // ---------- DS18B20 (temperatura, 1-Wire) ----------
 // Conversión de 12 bits (0,0625 °C) sin bloquear: una lectura cada ~2 s, mediana de las 3 últimas.

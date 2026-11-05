@@ -29,6 +29,10 @@ static VistaPrincipal base() {
   v.temp = 36.8f;
   v.rangoTemp = RangoTemperatura::Normal;
   v.acelerometro = true;
+  v.fr = 16;
+  v.estadoFr = EstadoRespiracion::Valida;
+  v.cama = "MED-B-01";  // vinculado: solo cama e iniciales
+  v.iniciales = "R.M.";
   v.codigo = "ESP32-001";
   v.red = "MiRedCasa";
   v.sesionActiva = true;
@@ -38,6 +42,28 @@ static VistaPrincipal base() {
 
 int main() {
   GFXcanvas1 principal(128, 64), ecg(128, 32);
+
+  // Sin vincular: el QR que escanea la enfermera (contenido real del backend) y los demás casos
+  VistaVinculacion vq;
+  vq.pantalla = PantallaVinculo::Qr;
+  vq.qr = "VTF1:ESP32-001:K7P3QX9M";
+  vq.segundosRestantes = 572;
+  vq.codigo = "ESP32-001";
+  vq.wifiBarras = 3;
+  vq.broker = 2;
+  dibujarVinculacion(principal, vq);
+  guardar(principal, "00a_vinculacion_qr");
+  vq.pantalla = PantallaVinculo::Solicitando;
+  vq.ms = 800;
+  dibujarVinculacion(principal, vq);
+  guardar(principal, "00b_vinculacion_pidiendo_qr");
+  vq.pantalla = PantallaVinculo::Vencido;
+  dibujarVinculacion(principal, vq);
+  guardar(principal, "00c_vinculacion_qr_vencido");
+  vq.pantalla = PantallaVinculo::Emparejando;
+  vq.ms = 1200;
+  dibujarVinculacion(principal, vq);
+  guardar(principal, "00d_emparejando");
 
   VistaArranque a;
   a.version = "2.0.0";
@@ -136,8 +162,28 @@ int main() {
   v.fc = 64;
   v.fcDelEcg = true;
   v.estadoTemp = EstadoTemperatura::SinContacto;
+  v.fr = -1;
+  v.estadoFr = EstadoRespiracion::Movimiento;
   dibujarPrincipal(principal, v);
   guardar(principal, "09_solo_ecg");
+
+  v = base();
+  v.fc = 78;
+  v.spo2 = 97;
+  v.fr = -1;
+  v.estadoFr = EstadoRespiracion::Midiendo;
+  v.estadoTemp = EstadoTemperatura::Estabilizando;
+  v.temp = 35.9f;
+  dibujarPrincipal(principal, v);
+  guardar(principal, "09b_fr_midiendo");
+
+  v = base();
+  v.fc = 78;
+  v.spo2 = 97;
+  v.aviso = "Repita: presion";
+  v.ms = 0;
+  dibujarPrincipal(principal, v);
+  guardar(principal, "09c_aviso_del_backend");
 
   // ECG: 6 s de señal sintética pasada por el mismo filtro del firmware
   ProcesadorEcg p;

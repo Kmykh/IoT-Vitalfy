@@ -15,8 +15,10 @@
 #define CODIGO_DISPOSITIVO "ESP32-001"
 
 // ============================ Red: broker MQTT ============================
-// Nombre mDNS de la laptop con Mosquitto: no cambia cuando el DHCP le da otra IP.
+// Desarrollo: nombre mDNS de la laptop con Mosquitto (no cambia cuando el DHCP le da otra IP), 1883 sin TLS.
 // Si una red bloquea mDNS, pon la IP de la laptop en esa red dentro de secretos.h.
+// Producción: el dominio del servidor y el 8883 con TLS van en secretos.h (MQTT_BROKER_TLS y MQTT_PUERTO_TLS);
+// con ellos, estos dos valores no se usan.
 #define MQTT_BROKER_POR_DEFECTO "MacBook-Air-de-Mayck.local"
 #define MQTT_PUERTO 1883
 #define MQTT_KEEPALIVE_S 15  // el broker publica "offline" si no sabe del wearable en ~22 s
@@ -24,6 +26,8 @@
 // Tópicos (Vitalify/Backend/docs/contrato-telemetria.md)
 #define TOPICO_TELEMETRIA "device/" CODIGO_DISPOSITIVO "/telemetria"  // lecturas, QoS 1
 #define TOPICO_ESTADO "device/" CODIGO_DISPOSITIVO "/estado"          // "online"/"offline" retenido
+#define TOPICO_COMANDOS "device/" CODIGO_DISPOSITIVO "/comandos"      // del backend: QR, vinculado... (QoS 1)
+#define TOPICO_SOLICITUDES "device/" CODIGO_DISPOSITIVO "/solicitudes"  // el wearable pide un QR nuevo
 
 // ============================ Telemetría ============================
 #define INTERVALO_TELEMETRIA_MS 10000  // una lectura cada 10 s (frecuencia del contrato); una caída sale al instante
