@@ -9,10 +9,12 @@
 #include "caidas.h"
 #include "ecg.h"
 #include "ppg.h"
+#include "respiracion.h"
 #include "senales.h"
 #include "telemetria.h"
 #include "sesion.h"
 #include "temperatura.h"
+#include "vinculacion.h"
 
 static int fallas = 0, total = 0;
 
@@ -395,14 +397,18 @@ static void pruebasTelemetria() {
   l.epochMs = 1790777110250LL;
   l.seq = 18234;
   l.fc = 82;
+  l.fr = 16;
   l.spo2 = 97;
   l.tempDecimas = 368;
   size_t n = construirJsonTelemetria("ESP32-001", l, buf, sizeof buf);
   printf("  %s\n", buf);
   VERIFICAR(n > 0 && strcmp(buf,
                             "{\"dispositivo\":\"ESP32-001\",\"ts\":\"2026-09-30T14:05:10.250Z\",\"seq\":18234,"
-                            "\"fc\":82,\"spo2\":97,\"temp\":36.8,\"caida\":false}") == 0,
+                            "\"fc\":82,\"fr\":16,\"spo2\":97,\"temp\":36.8,\"caida\":false}") == 0,
             "JSON completo: %s", buf);
+  Lectura soloFr;  // paciente quieto sin dedo: la FR sola ya es una lectura
+  soloFr.fr = 18;
+  VERIFICAR(soloFr.tieneDatos(), "una lectura con solo FR no tiene datos");
 
   Lectura s;  // solo temperatura y una caída
   s.epochMs = 1790777110250LL;
@@ -583,13 +589,225 @@ static void pruebasSesion() {
   VERIFICAR(sinOximetro.monitoreando(), "sin oxímetro no inició con los electrodos");
 }
 
+// Corre el generador de respiración `segundos` y devuelve la FR al final (y el primer segundo con FR).
+struct ResultadoFr {
+  int fr = -1;
+  EstadoRespiracion estado = EstadoRespiracion::Midiendo;
+  double primeraFr = -1;  // s hasta la primera FR válida
+};
+static ResultadoFr correrRespiracion(MonitorRespiracion& m, GeneradorRespiracion& g, double segundos, double desde = 0) {
+  ResultadoFr r;
+  const int n = (int)(segundos * g.fs);
+  for (int i = 0; i < n; i++) {
+    float ax, ay, az;
+    g.muestra(ax, ay, az);
+    m.procesar(ax, ay, az);
+    if (r.primeraFr < 0 && m.fr() > 0) r.primeraFr = desde + i / g.fs;
+  }
+  r.fr = m.fr();
+  r.estado = m.estado();
+  return r;
+}
+
+static void pruebasRespiracion() {
+  printf("Frecuencia respiratoria (MPU6050 sobre el tórax)\n");
+
+  // Todo el rango clínico: NEWS2 separa en ≤8, 9–11, 12–20, 21–24 y ≥25
+  for (double rpm : {6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 24.0, 28.0, 35.0, 45.0}) {
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.rpm = rpm;
+    const ResultadoFr r = correrRespiracion(m, g, 60);
+    printf("  fr real %4.1f -> fr %2d (primera a los %.0f s, correlación %.2f, %.1f mg)\n", rpm, r.fr, r.primeraFr,
+           m.correlacion(), 1000 * m.amplitud());
+    VERIFICAR(r.estado == EstadoRespiracion::Valida && fabs(r.fr - rpm) <= 1, "FR a %.0f rpm: %d", rpm, r.fr);
+    VERIFICAR(r.primeraFr > 0 && r.primeraFr <= 36, "la primera FR tardó %.0f s a %.0f rpm", r.primeraFr, rpm);
+  }
+
+  {  // Ritmo irregular (±15 % por ciclo)
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.rpm = 18;
+    g.variabilidad = 0.15;
+    const ResultadoFr r = correrRespiracion(m, g, 90);
+    printf("  irregular 18 -> %d\n", r.fr);
+    VERIFICAR(r.fr > 0 && abs(r.fr - 18) <= 2, "FR irregular: %d", r.fr);
+  }
+  {  // Inspiración corta (1/3 del ciclo): la onda tiene armónicos, no debe dar el doble
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.rpm = 14;
+    g.inspiracion = 0.3;
+    const ResultadoFr r = correrRespiracion(m, g, 60);
+    printf("  inspiración corta 14 -> %d\n", r.fr);
+    VERIFICAR(r.fr > 0 && abs(r.fr - 14) <= 1, "FR con inspiración corta: %d", r.fr);
+  }
+  {  // Otra orientación: el wearable de pie (gravedad en y) y la respiración gira sobre x y z a la vez
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.rpm = 22;
+    g.gx = 0, g.gy = -1, g.gz = 0;
+    g.ex = 0.6, g.ey = 0, g.ez = 0.8;
+    const ResultadoFr r = correrRespiracion(m, g, 60);
+    printf("  de pie 22 -> %d\n", r.fr);
+    VERIFICAR(r.fr > 0 && abs(r.fr - 22) <= 1, "FR de pie: %d", r.fr);
+  }
+  {  // Latido marcado (balistocardiograma de 4 mg a 75 lpm) con respiración lenta
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.rpm = 12;
+    g.latido = 0.004;
+    g.fcLatido = 75;
+    const ResultadoFr r = correrRespiracion(m, g, 60);
+    printf("  con latido 12 -> %d\n", r.fr);
+    VERIFICAR(r.fr > 0 && abs(r.fr - 12) <= 1, "FR con latido: %d", r.fr);
+  }
+  {  // Respiración superficial: 3 mg de cambio de la gravedad con 3 mg de ruido
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.rpm = 16;
+    g.inclinacion = 0.003;
+    const ResultadoFr r = correrRespiracion(m, g, 60);
+    printf("  superficial 16 -> %d (%.1f mg)\n", r.fr, 1000 * m.amplitud());
+    VERIFICAR(r.fr > 0 && abs(r.fr - 16) <= 1, "FR superficial: %d", r.fr);
+  }
+  {  // Sobre la mesa (sin respiración): no inventa una FR
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.inclinacion = 0;
+    const ResultadoFr r = correrRespiracion(m, g, 60);
+    VERIFICAR(r.fr < 0 && r.estado == EstadoRespiracion::SinSenal, "FR sin respiración: %d (estado %d)", r.fr, (int)r.estado);
+  }
+  {  // Caminando: movimiento, sin FR
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.movimiento = 0.3;
+    const ResultadoFr r = correrRespiracion(m, g, 60);
+    VERIFICAR(r.fr < 0 && r.estado == EstadoRespiracion::Movimiento, "FR caminando: %d (estado %d)", r.fr, (int)r.estado);
+  }
+  {  // Quieto -> se mueve -> quieto con otra FR: la FR anterior dura 10 s y la nueva llega tras la ventana
+    MonitorRespiracion m;
+    GeneradorRespiracion g;
+    g.rpm = 16;
+    ResultadoFr r = correrRespiracion(m, g, 50);
+    VERIFICAR(r.fr == 16, "antes del movimiento: %d", r.fr);
+    g.movimiento = 0.3;
+    r = correrRespiracion(m, g, 5);
+    VERIFICAR(r.estado == EstadoRespiracion::Movimiento && r.fr == 16, "durante el movimiento: %d (estado %d)", r.fr,
+              (int)r.estado);
+    r = correrRespiracion(m, g, 10);
+    VERIFICAR(r.fr < 0, "la FR de antes siguió tras 15 s de movimiento: %d", r.fr);
+    g.movimiento = 0;
+    g.rpm = 26;
+    r = correrRespiracion(m, g, 20);
+    VERIFICAR(r.fr < 0 && r.estado == EstadoRespiracion::Midiendo, "dio FR sin una ventana quieta completa: %d", r.fr);
+    r = correrRespiracion(m, g, 20);
+    printf("  tras moverse: 26 -> %d\n", r.fr);
+    VERIFICAR(r.fr > 0 && abs(r.fr - 26) <= 1, "FR después del movimiento: %d", r.fr);
+  }
+}
+
+static bool comando(const char* json, Comando* c) { return interpretarComando(json, strlen(json), c); }
+
+static void pruebasVinculacion() {
+  printf("Comandos del backend y vinculación por QR\n");
+  // Los mismos JSON que fija el backend (ContratoComandos)
+  Comando c;
+  VERIFICAR(comando("{\"accion\":\"mostrar-qr\",\"qr\":\"VTF1:ESP32-001:K7P3QX9M\",\"expira\":\"2026-11-02T15:10:00Z\"}", &c) &&
+                c.accion == AccionComando::MostrarQr && strcmp(c.qr, "VTF1:ESP32-001:K7P3QX9M") == 0,
+            "mostrar-qr: %s", c.qr);
+  char iso[32];
+  formatearIso8601(c.expiraMs, iso, sizeof iso);
+  VERIFICAR(strcmp(iso, "2026-11-02T15:10:00.000Z") == 0, "expira: %s", iso);
+  VERIFICAR(comando("{\"accion\":\"emparejando\"}", &c) && c.accion == AccionComando::Emparejando, "emparejando");
+  VERIFICAR(comando("{\"accion\":\"vinculado\",\"cama\":\"MED-B-01\",\"iniciales\":\"R.M.\"}", &c) &&
+                c.accion == AccionComando::Vinculado && strcmp(c.cama, "MED-B-01") == 0 && strcmp(c.iniciales, "R.M.") == 0,
+            "vinculado: %s %s", c.cama, c.iniciales);
+  VERIFICAR(comando("{\"accion\":\"desvinculado\"}", &c) && c.accion == AccionComando::Desvinculado, "desvinculado");
+  VERIFICAR(comando("{\"accion\":\"repetir-medicion\",\"variable\":\"presion\",\"motivo\":\"Falta la diastólica\"}", &c) &&
+                c.accion == AccionComando::RepetirMedicion && strcmp(c.motivo, "Falta la diastolica") == 0,
+            "repetir-medicion: %s", c.motivo);
+
+  // Tolerante con el formato, estricto con el contenido
+  VERIFICAR(comando(" { \"qr\" : \"VTF1:X:Y\" , \"extra\":{\"a\":[1,\"}\"]}, \"accion\" : \"mostrar-qr\" } ", &c) &&
+                c.accion == AccionComando::MostrarQr && strcmp(c.qr, "VTF1:X:Y") == 0 && c.expiraMs == 0,
+            "orden, espacios y valores anidados");
+  VERIFICAR(comando("{\"accion\":\"reiniciar\"}", &c) && c.accion == AccionComando::Desconocida, "acción desconocida");
+  VERIFICAR(!comando("{\"accion\":\"mostrar-qr\"}", &c), "mostrar-qr sin qr");
+  VERIFICAR(!comando("{no es json", &c) && !comando("", &c) && !comando("{\"accion\":7}", &c), "JSON inválido");
+  VERIFICAR(comando("{\"accion\":\"vinculado\",\"cama\":\"UCI\\u00d101\",\"iniciales\":\"\\\"J.\\\"\"}", &c) &&
+                strcmp(c.cama, "UCIN01") == 0 && strcmp(c.iniciales, "\"J.\"") == 0,
+            "escapes: %s %s", c.cama, c.iniciales);
+  char ascii[32];
+  aAscii("Ñandú í Ü €", ascii, sizeof ascii);
+  VERIFICAR(strcmp(ascii, "Nandu i U ?") == 0, "aAscii: %s", ascii);
+  VERIFICAR(interpretarIso8601("2026-11-02T15:10:00.250Z") == interpretarIso8601("2026-11-02T15:10:00Z") + 250 &&
+                interpretarIso8601("2026-11-02 15:10:00") == 0 && interpretarIso8601("2026-13-02T15:10:00Z") == 0,
+            "ISO 8601");
+
+  // Máquina de estados
+  Vinculacion v;
+  Comando qr, empareja, vinc, desv;
+  comando("{\"accion\":\"mostrar-qr\",\"qr\":\"VTF1:ESP32-001:K7P3QX9M\",\"expira\":\"2026-11-02T15:10:00Z\"}", &qr);
+  comando("{\"accion\":\"emparejando\"}", &empareja);
+  comando("{\"accion\":\"vinculado\",\"cama\":\"MED-B-01\",\"iniciales\":\"R.M.\"}", &vinc);
+  comando("{\"accion\":\"desvinculado\"}", &desv);
+  const int64_t antesDeVencer = qr.expiraMs - 60000;
+  VERIFICAR(v.estado() == EstadoVinculo::Desconocido && v.aceptaLecturas() && !v.puedePublicar(),
+            "al arrancar guarda lecturas pero no publica");
+  v.alConectar(1000);
+  VERIFICAR(!v.debeSolicitarQr(5999, antesDeVencer, false) && v.debeSolicitarQr(6000, antesDeVencer, false),
+            "sin comando retenido pide un QR a los 5 s");
+  VERIFICAR(!v.debeSolicitarQr(7000, antesDeVencer, true), "pidió dos QR en menos de 10 s");
+  EfectoComando e = v.aplicar(qr, 7000);
+  VERIFICAR(v.estado() == EstadoVinculo::EsperandoQr && e.descartarBufer && !v.aceptaLecturas(),
+            "mostrar-qr: espera el escaneo y descarta lo guardado");
+  VERIFICAR(!v.debeSolicitarQr(20000, antesDeVencer, false) && v.debeSolicitarQr(20000, qr.expiraMs, false),
+            "pide otro QR solo cuando vence");
+  VERIFICAR(v.debeSolicitarQr(31000, antesDeVencer, true), "el botón no pide otro QR");
+  e = v.aplicar(empareja, 32000);
+  VERIFICAR(v.estado() == EstadoVinculo::Emparejando && !v.aceptaLecturas() && !v.debeSolicitarQr(60000, qr.expiraMs, true),
+            "emparejando");
+  e = v.aplicar(vinc, 40000);
+  VERIFICAR(v.estado() == EstadoVinculo::Vinculado && !e.descartarBufer && v.puedePublicar() &&
+                strcmp(v.cama(), "MED-B-01") == 0 && !v.debeSolicitarQr(90000, qr.expiraMs, true),
+            "vinculado: publica y no pide QR");
+  v.alDesconectar();
+  VERIFICAR(v.aceptaLecturas() && !v.puedePublicar(), "sin broker guarda pero no publica");
+  v.alConectar(100000);
+  VERIFICAR(!v.puedePublicar(), "tras reconectar publicó sin esperar el comando retenido");
+  e = v.aplicar(vinc, 100200);  // el retenido: sigue vinculado
+  VERIFICAR(v.puedePublicar() && !e.descartarBufer, "retenido vinculado: vacía el búfer");
+  e = v.aplicar(desv, 200000);  // egreso
+  VERIFICAR(v.estado() == EstadoVinculo::EsperandoQr && e.descartarBufer && !v.qr()[0] && !v.cama()[0],
+            "desvinculado: vuelve a esperar el QR y descarta");
+  VERIFICAR(!v.debeSolicitarQr(204000, 0, false) && v.debeSolicitarQr(205000, 0, false),
+            "sin el QR nuevo a los 5 s del desvinculado, lo pide");
+  Comando repetir;
+  comando("{\"accion\":\"repetir-medicion\",\"variable\":\"presion\",\"motivo\":\"x\"}", &repetir);
+  v.aplicar(repetir, 210000);
+  VERIFICAR(strcmp(v.aviso(), "Repita: presion") == 0 && v.avisoMs() == 210000 && v.estado() == EstadoVinculo::EsperandoQr,
+            "repetir-medicion: %s", v.aviso());
+
+  // QR: versión más chica posible y que entre en la OLED
+  uint8_t q[kQrTamBuffer];
+  const int lado = generarQr("VTF1:ESP32-001:K7P3QX9M", q);
+  VERIFICAR(lado == 25, "QR de un código de 9 caracteres: %d módulos", lado);
+  VERIFICAR(moduloQr(q, 0, 0) && moduloQr(q, 6, 6) && !moduloQr(q, 7, 7), "patrón de posición del QR");
+  const int largo = generarQr("VTF1:ABCDEFGHIJKLMNOPQRSTUVWXYZ012345:K7P3QX9M", q);  // código de 32 caracteres
+  VERIFICAR(largo > 0 && largo * 2 <= 64, "QR de un código de 32 caracteres: %d módulos", largo);
+  printf("  QR: %d módulos (%d px) con un código de 9; %d (%d px) con uno de 32\n", lado, 2 * lado, largo, 2 * largo);
+}
+
 int main() {
   pruebasSesion();
   pruebasTemperatura();
   pruebasPpg();
   pruebasEcg();
   pruebasCaidas();
+  pruebasRespiracion();
   pruebasTelemetria();
+  pruebasVinculacion();
   printf("\n%d de %d verificaciones pasaron\n", total - fallas, total);
   return fallas == 0 ? 0 : 1;
 }

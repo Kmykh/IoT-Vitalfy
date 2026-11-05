@@ -24,6 +24,8 @@
 // Tópicos (Vitalify/Backend/docs/contrato-telemetria.md)
 #define TOPICO_TELEMETRIA "device/" CODIGO_DISPOSITIVO "/telemetria"  // lecturas, QoS 1
 #define TOPICO_ESTADO "device/" CODIGO_DISPOSITIVO "/estado"          // "online"/"offline" retenido
+#define TOPICO_COMANDOS "device/" CODIGO_DISPOSITIVO "/comandos"      // del backend: QR, vinculado... (QoS 1)
+#define TOPICO_SOLICITUDES "device/" CODIGO_DISPOSITIVO "/solicitudes"  // el wearable pide un QR nuevo
 
 // ============================ Telemetría ============================
 #define INTERVALO_TELEMETRIA_MS 10000  // una lectura cada 10 s (frecuencia del contrato); una caída sale al instante

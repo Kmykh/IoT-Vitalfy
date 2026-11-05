@@ -16,9 +16,13 @@ if ! echo 'int main(){}' | "$CXX" -x c++ - -o /dev/null >/dev/null 2>&1; then
 fi
 
 GFX=../../libraries/Adafruit_GFX_Library
+CC="${CC:-$(dirname "$CXX")/clang}"
+[ -x "$CC" ] || CC=cc
 mkdir -p salida
 rm -f salida/*.pbm
+"$CC" -std=c99 -O1 -c ../qrcodegen.c -o salida/qrcodegen.o
 "$CXX" -std=c++17 -O1 -DARDUINO=100 -Istubs -I"$GFX" -I.. \
-  ../pantallas.cpp ../ecg.cpp ../ppg.cpp ../temperatura.cpp "$GFX/Adafruit_GFX.cpp" vista_previa.cpp -o salida/vista_previa
+  ../pantallas.cpp ../ecg.cpp ../ppg.cpp ../temperatura.cpp ../vinculacion.cpp salida/qrcodegen.o \
+  "$GFX/Adafruit_GFX.cpp" vista_previa.cpp -o salida/vista_previa
 ./salida/vista_previa
 python3 vista_previa.py

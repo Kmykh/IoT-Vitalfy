@@ -2,10 +2,11 @@
 // (Vitalify/Backend/docs/contrato-telemetria.md):
 //
 //   {"dispositivo":"ESP32-001","ts":"2026-09-30T14:05:10.250Z","seq":18234,
-//    "fc":82,"spo2":97,"temp":36.8,"caida":false}
+//    "fc":82,"fr":16,"spo2":97,"temp":36.8,"caida":false}
 //
-// Una variable que el sensor no midió se omite (el backend la trata como ausente).
-// Este wearable no mide fr, pas, pad ni bateria, así que nunca los envía.
+// Una variable que el sensor no midió se omite (el backend la trata como ausente). La FR sale del
+// MPU6050 (respiracion.h) y solo va con el paciente quieto. Este wearable no mide pas, pad ni bateria,
+// así que nunca los envía.
 // C++ puro: se prueba en el computador (pruebas/).
 #pragma once
 
@@ -19,11 +20,12 @@ struct Lectura {
   int64_t epochMs = 0;   // hora UTC de la medición en ms; 0 = aún sin hora NTP
   uint32_t seq = 0;      // contador creciente de lecturas desde el arranque
   int16_t fc = -1;       // lpm; -1 = no medido
+  int16_t fr = -1;       // respiraciones por minuto; -1 = no medido
   int16_t spo2 = -1;     // %; -1 = no medido
   int16_t tempDecimas = kSinTemperatura;  // °C × 10
   bool caida = false;
 
-  bool tieneDatos() const { return fc >= 0 || spo2 >= 0 || tempDecimas != kSinTemperatura || caida; }
+  bool tieneDatos() const { return fc >= 0 || fr >= 0 || spo2 >= 0 || tempDecimas != kSinTemperatura || caida; }
 };
 
 // Instante UTC de la medición = ahora − edad de la lectura (medida con el reloj monotónico).
@@ -49,6 +51,7 @@ class BuferLecturas {
     cantidad_++;
     return cupo;
   }
+  void vaciar() { inicio_ = cantidad_ = 0; }  // las lecturas eran de otro paciente: no se envían
   void quitarFrente() {
     if (cantidad_ == 0) return;
     inicio_ = (inicio_ + 1) % N;

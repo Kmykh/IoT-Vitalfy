@@ -7,6 +7,7 @@
 #include <driver/gpio.h>
 
 #include <atomic>
+#include <initializer_list>
 
 #include "filtros.h"
 
@@ -41,12 +42,94 @@ TwoWire* busPpg = nullptr;
 const uint8_t kDirPpg = 0x57;
 const uint8_t kFifoEscritura = 0x04, kFifoDesborde = 0x05, kFifoLectura = 0x06, kFifoDatos = 0x07;
 
-// ---------- ADXL345 ----------
+// ---------- Acelerómetro: MPU6050 (el de la placa) o ADXL345 (protoboard anterior) ----------
 TwoWire* busAcel = nullptr;
-const uint8_t kDirAcel = 0x53;
+ModeloAcel modeloAcel = ModeloAcel::Ninguno;
+uint8_t dirAcel = 0;
+
+// ADXL345
+const uint8_t kDirAdxl = 0x53;
 const uint8_t kDevId = 0x00, kBwRate = 0x2C, kPowerCtl = 0x2D, kDataFormat = 0x31, kDatos = 0x32, kFifoCtl = 0x38,
               kFifoStatus = 0x39;
-const float kGPorBit = 0.0039f;  // 3,9 mg por bit en resolución completa
+const float kGPorBitAdxl = 0.0039f;  // 3,9 mg por bit en resolución completa
+
+// MPU6050 (y sus variantes MPU6500/9250, que comparten estos registros)
+const uint8_t kSmplrtDiv = 0x19, kConfig = 0x1A, kAccelConfig = 0x1C, kAccelConfig2 = 0x1D, kFifoEn = 0x23,
+              kIntStatus = 0x3A, kUserCtrl = 0x6A, kPwrMgmt1 = 0x6B, kPwrMgmt2 = 0x6C, kFifoCount = 0x72,
+              kFifoRw = 0x74, kWhoAmI = 0x75;
+const float kGPorBitMpu = 1.0f / 2048.0f;  // ±16 g: 2048 cuentas por g (0,49 mg)
+const int kMuestrasPorLecturaMpu = 21;     // 126 bytes: el búfer de Wire en el ESP32 es de 128
+
+bool esMpu(uint8_t quienSoy) {
+  // 0x68 MPU6050 original; 0x70 MPU6500, 0x71 MPU9250, 0x73 MPU9255 y 0x98/0x72 en clones comunes
+  return quienSoy == 0x68 || quienSoy == 0x70 || quienSoy == 0x71 || quienSoy == 0x72 || quienSoy == 0x73 ||
+         quienSoy == 0x98;
+}
+
+bool iniciarMpu(TwoWire& bus, uint8_t dir) {
+  const uint8_t quienSoy = leerRegistro(bus, dir, kWhoAmI);
+  if (!esMpu(quienSoy)) return false;
+  if (!escribirRegistro(bus, dir, kPwrMgmt1, 0x80)) return false;  // reinicio
+  delay(100);
+  const bool ok = escribirRegistro(bus, dir, kPwrMgmt1, 0x00)      // despierto, reloj interno de 8 MHz
+                  && escribirRegistro(bus, dir, kPwrMgmt2, 0x07)   // giroscopios apagados: solo el acelerómetro
+                  && escribirRegistro(bus, dir, kConfig, 0x03)     // pasa-bajos de 44 Hz, muestreo interno de 1 kHz
+                  && escribirRegistro(bus, dir, kSmplrtDiv, 9)     // 1 kHz / (1 + 9) = 100 Hz
+                  && escribirRegistro(bus, dir, kAccelConfig, 0x18)  // ±16 g (un golpe de caída supera los 2 g)
+                  && (quienSoy == 0x68 || escribirRegistro(bus, dir, kAccelConfig2, 0x03))  // 6500/9250: 44 Hz
+                  && escribirRegistro(bus, dir, kFifoEn, 0x08)      // al FIFO solo el acelerómetro (6 bytes)
+                  && escribirRegistro(bus, dir, kUserCtrl, 0x04)    // vacía el FIFO
+                  && escribirRegistro(bus, dir, kUserCtrl, 0x40);   // y lo enciende
+  return ok;
+}
+
+bool iniciarAdxl(TwoWire& bus) {
+  if (leerRegistro(bus, kDirAdxl, kDevId) != 0xE5) return false;
+  return escribirRegistro(bus, kDirAdxl, kPowerCtl, 0x00)      // reposo para configurar
+         && escribirRegistro(bus, kDirAdxl, kDataFormat, 0x0B)  // resolución completa, ±16 g
+         && escribirRegistro(bus, kDirAdxl, kBwRate, 0x0A)      // 100 Hz
+         && escribirRegistro(bus, kDirAdxl, kFifoCtl, 0x80)     // FIFO en modo stream
+         && escribirRegistro(bus, kDirAdxl, kPowerCtl, 0x08);   // a medir
+}
+
+int leerAdxl(TwoWire& bus, float* ax, float* ay, float* az, int max) {
+  int n = leerRegistro(bus, kDirAdxl, kFifoStatus) & 0x3F;
+  if (n > max) n = max;
+  for (int i = 0; i < n; i++) {
+    uint8_t b[6];  // X, Y, Z en una sola lectura: así el FIFO avanza una muestra completa
+    if (!leerBloque(bus, kDirAdxl, kDatos, b, 6)) return i;
+    ax[i] = (int16_t)(b[1] << 8 | b[0]) * kGPorBitAdxl;
+    ay[i] = (int16_t)(b[3] << 8 | b[2]) * kGPorBitAdxl;
+    az[i] = (int16_t)(b[5] << 8 | b[4]) * kGPorBitAdxl;
+  }
+  return n;
+}
+
+// El FIFO del MPU6050 es de 1024 bytes, que no es múltiplo de 6: si se desborda, sobrescribe a mitad de
+// una muestra y todo lo que sigue queda desalineado. Por eso, ante un desborde se vacía y se sigue.
+int leerMpu(TwoWire& bus, uint8_t dir, float* ax, float* ay, float* az, int max) {
+  if (leerRegistro(bus, dir, kIntStatus) & 0x10) {  // FIFO_OFLOW (se borra al leer)
+    escribirRegistro(bus, dir, kUserCtrl, 0x44);
+    return 0;
+  }
+  uint8_t c[2];
+  if (!leerBloque(bus, dir, kFifoCount, c, 2)) return 0;
+  int n = ((c[0] << 8) | c[1]) / 6;
+  if (n > max) n = max;
+  int leidas = 0;
+  while (leidas < n) {
+    const int k = n - leidas < kMuestrasPorLecturaMpu ? n - leidas : kMuestrasPorLecturaMpu;
+    uint8_t b[6 * kMuestrasPorLecturaMpu];
+    if (!leerBloque(bus, dir, kFifoRw, b, (uint8_t)(6 * k))) break;
+    for (int i = 0; i < k; i++, leidas++) {
+      const uint8_t* m = b + 6 * i;  // X, Y, Z en big-endian
+      ax[leidas] = (int16_t)(m[0] << 8 | m[1]) * kGPorBitMpu;
+      ay[leidas] = (int16_t)(m[2] << 8 | m[3]) * kGPorBitMpu;
+      az[leidas] = (int16_t)(m[4] << 8 | m[5]) * kGPorBitMpu;
+    }
+  }
+  return leidas;
+}
 
 // ---------- DS18B20 ----------
 DallasTemperature* ds18b20 = nullptr;
@@ -192,29 +275,47 @@ int ppgLeer(uint32_t* ir, uint32_t* rojo, int max, uint8_t* perdidas) {
   return leidas;
 }
 
-// ============================ ADXL345 ============================
+// ============================ Acelerómetro ============================
 bool acelIniciar(TwoWire& bus) {
   busAcel = &bus;
-  if (leerRegistro(bus, kDirAcel, kDevId) != 0xE5) return false;
-  return escribirRegistro(bus, kDirAcel, kPowerCtl, 0x00)      // reposo para configurar
-         && escribirRegistro(bus, kDirAcel, kDataFormat, 0x0B)  // resolución completa, ±16 g
-         && escribirRegistro(bus, kDirAcel, kBwRate, 0x0A)      // 100 Hz
-         && escribirRegistro(bus, kDirAcel, kFifoCtl, 0x80)     // FIFO en modo stream
-         && escribirRegistro(bus, kDirAcel, kPowerCtl, 0x08);   // a medir
+  for (uint8_t dir : {(uint8_t)0x68, (uint8_t)0x69}) {  // AD0 a GND (lo normal en el GY-521) o a 3V3
+    if (i2cPresente(bus, dir) && iniciarMpu(bus, dir)) {
+      modeloAcel = ModeloAcel::Mpu6050;
+      dirAcel = dir;
+      return true;
+    }
+  }
+  if (iniciarAdxl(bus)) {
+    modeloAcel = ModeloAcel::Adxl345;
+    dirAcel = kDirAdxl;
+    return true;
+  }
+  modeloAcel = ModeloAcel::Ninguno;
+  return false;
 }
 
 int acelLeer(float* ax, float* ay, float* az, int max) {
-  TwoWire& bus = *busAcel;
-  int n = leerRegistro(bus, kDirAcel, kFifoStatus) & 0x3F;
-  if (n > max) n = max;
-  for (int i = 0; i < n; i++) {
-    uint8_t b[6];  // X, Y, Z en una sola lectura: así el FIFO avanza una muestra completa
-    if (!leerBloque(bus, kDirAcel, kDatos, b, 6)) return i;
-    ax[i] = (int16_t)(b[1] << 8 | b[0]) * kGPorBit;
-    ay[i] = (int16_t)(b[3] << 8 | b[2]) * kGPorBit;
-    az[i] = (int16_t)(b[5] << 8 | b[4]) * kGPorBit;
+  switch (modeloAcel) {
+    case ModeloAcel::Mpu6050:
+      return leerMpu(*busAcel, dirAcel, ax, ay, az, max);
+    case ModeloAcel::Adxl345:
+      return leerAdxl(*busAcel, ax, ay, az, max);
+    default:
+      return 0;
   }
-  return n;
+}
+
+ModeloAcel acelModelo() { return modeloAcel; }
+
+const char* acelNombre() {
+  switch (modeloAcel) {
+    case ModeloAcel::Mpu6050:
+      return "MPU6050";
+    case ModeloAcel::Adxl345:
+      return "ADXL345";
+    default:
+      return "acelerometro";
+  }
 }
 
 // ============================ DS18B20 ============================

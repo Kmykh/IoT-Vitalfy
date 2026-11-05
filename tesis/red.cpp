@@ -12,6 +12,7 @@
 #include <atomic>
 
 #include "config.h"
+#include "vinculacion.h"
 
 struct RedWifi {
   const char* ssid;
@@ -57,6 +58,17 @@ int nCandidatos = 0, iCandidato = 0, redActual = -1;
 uint32_t tFase = 0, esperaMs = 0, backoffMs = 2000, tRssi = 0;
 std::atomic<int> razonDesconexion{0};
 char nombreHost[40];
+
+// ---------- Comandos del backend (vinculación) ----------
+struct MensajeComando {
+  uint16_t largo;
+  char json[256];
+};
+QueueHandle_t colaComandos = nullptr;     // los encola el manejador de esp-mqtt; los aplica esta tarea
+std::atomic<uint32_t> conexiones{0};      // cada MQTT_EVENT_CONNECTED (antes que sus retenidos)
+uint32_t conexionesVistas = 0;
+std::atomic<bool> pedirQr{false};         // botón
+Vinculacion vinculo;                      // solo lo usa esta tarea
 
 // ---------- Broker y MQTT ----------
 esp_mqtt_client_handle_t cliente = nullptr;
@@ -120,6 +132,7 @@ void atenderHora() {
 void recibirLecturas() {
   Lectura l;
   while (xQueueReceive(colaLecturas, &l, 0) == pdTRUE) {
+    if (!vinculo.aceptaLecturas()) continue;  // el loop la mandó justo antes de enterarse del cambio
     if (estado.horaSincronizada) asignarHora(l, ahoraEpochMs(), esp_timer_get_time());
     if (!bufer.agregar(l)) enVuelo = false;  // lleno: salió la más antigua, que era la que estaba en vuelo
   }
@@ -131,11 +144,26 @@ void manejadorMqtt(void*, esp_event_base_t, int32_t id, void* datos) {
   const auto* e = static_cast<esp_mqtt_event_handle_t>(datos);
   switch (static_cast<esp_mqtt_event_id_t>(id)) {
     case MQTT_EVENT_CONNECTED:
+      conexiones++;
       mqttConectado = true;
       mqttRechazado = false;
       erroresTransporte = 0;
+      // Primero la suscripción: los comandos retenidos (QR o "vinculado") llegan apenas se suscribe
+      esp_mqtt_client_subscribe(e->client, TOPICO_COMANDOS, 1);
       esp_mqtt_client_enqueue(e->client, TOPICO_ESTADO, "online", 0, 1, 1, true);
       break;
+    case MQTT_EVENT_DATA: {
+      const size_t largoTopico = sizeof(TOPICO_COMANDOS) - 1;
+      if (e->current_data_offset != 0 || e->data_len != e->total_data_len) break;  // los comandos caben enteros
+      if ((size_t)e->topic_len != largoTopico || memcmp(e->topic, TOPICO_COMANDOS, largoTopico) != 0) break;
+      MensajeComando m;
+      if (e->data_len >= (int)sizeof m.json) break;
+      m.largo = (uint16_t)e->data_len;
+      memcpy(m.json, e->data, (size_t)e->data_len);
+      m.json[m.largo] = 0;
+      xQueueSend(colaComandos, &m, 0);
+      break;
+    }
     case MQTT_EVENT_DISCONNECTED:
       mqttConectado = false;
       break;
@@ -236,7 +264,10 @@ void atenderBroker(uint32_t ahora) {
     mqttConectadoAntes = conectado;
     Serial.printf(conectado ? "[red] MQTT conectado a %s:%d\n" : "[red] MQTT desconectado de %s:%d\n", brokerIp,
                   MQTT_PUERTO);
-    if (conectado) avisar("");
+    if (conectado)
+      avisar("");
+    else
+      vinculo.alDesconectar();
   }
   if (mqttRechazado) {
     estado.broker = EstadoBroker::Rechazado;
@@ -269,6 +300,8 @@ void publicarPendientes(uint32_t ahora) {
     enVuelo = false;
     return;
   }
+  // Sin paciente vinculado no se publica; tras reconectar, se espera el comando retenido de esta conexión
+  if (!vinculo.puedePublicar()) return;
   if (enVuelo && ahora - enviadoEn < kTiempoPubackMs) return;
   enVuelo = false;  // sin confirmación a tiempo: se reenvía (el backend descarta duplicados por ts)
   if (bufer.cantidad() == 0 || !estado.horaSincronizada) return;
@@ -289,6 +322,75 @@ void publicarPendientes(uint32_t ahora) {
   idEnVuelo = msg;
   enviadoEn = ahora;
   Serial.printf("[mqtt] %s %s\n", TOPICO_TELEMETRIA, json);
+}
+
+// ---------- Vinculación ----------
+const char* nombreEstado(EstadoVinculo e) {
+  switch (e) {
+    case EstadoVinculo::EsperandoQr:
+      return "esperando el escaneo del QR";
+    case EstadoVinculo::Emparejando:
+      return "emparejando";
+    case EstadoVinculo::Vinculado:
+      return "vinculado";
+    default:
+      return "sin datos";
+  }
+}
+
+void atenderComandos(uint32_t ahora) {
+  const uint32_t c = conexiones.load();
+  if (c != conexionesVistas) {  // conexión nueva: hasta su primer comando no se sabe si sigue vinculado
+    conexionesVistas = c;
+    vinculo.alConectar(ahora);
+  }
+
+  MensajeComando m;
+  while (xQueueReceive(colaComandos, &m, 0) == pdTRUE) {
+    Comando cmd;
+    if (!interpretarComando(m.json, m.largo, &cmd)) {
+      Serial.printf("[cmd] comando ilegible (%u bytes): se ignora\n", (unsigned)m.largo);
+      continue;
+    }
+    if (cmd.accion == AccionComando::Desconocida) {
+      Serial.println("[cmd] accion desconocida: se ignora");
+      continue;
+    }
+    const EfectoComando efecto = vinculo.aplicar(cmd, ahora);
+    switch (cmd.accion) {
+      case AccionComando::MostrarQr:
+        Serial.printf("[cmd] QR nuevo para vincular (%s)\n", cmd.qr);
+        break;
+      case AccionComando::Vinculado:  // solo cama e iniciales: nunca llega el nombre
+        Serial.printf("[cmd] vinculado: cama %s, %s\n", cmd.cama, cmd.iniciales);
+        break;
+      case AccionComando::RepetirMedicion:
+        Serial.printf("[cmd] repetir la medicion de %s\n", cmd.variable);
+        break;
+      default:
+        if (efecto.cambioEstado) Serial.printf("[cmd] %s\n", nombreEstado(vinculo.estado()));
+    }
+    if (efecto.descartarBufer && bufer.cantidad() > 0) {
+      Serial.printf("[cmd] se descartan %d lecturas guardadas: no son del paciente vinculado\n", bufer.cantidad());
+      bufer.vaciar();
+      enVuelo = false;
+    }
+  }
+
+  const bool boton = pedirQr.exchange(false);
+  if (mqttConectado && vinculo.debeSolicitarQr(ahora, estado.horaSincronizada ? ahoraEpochMs() : 0, boton)) {
+    const int msg = esp_mqtt_client_publish(cliente, TOPICO_SOLICITUDES, kSolicitudQr, 0, 1, 0);
+    Serial.printf("[cmd] %s un QR nuevo al backend%s\n", msg > 0 ? "se pide" : "no se pudo pedir",
+                  boton ? " (boton)" : "");
+  }
+
+  estado.vinculo = vinculo.estado();
+  strlcpy(estado.qr, vinculo.qr(), sizeof estado.qr);
+  estado.qrExpiraMs = vinculo.expiraMs();
+  strlcpy(estado.cama, vinculo.cama(), sizeof estado.cama);
+  strlcpy(estado.iniciales, vinculo.iniciales(), sizeof estado.iniciales);
+  strlcpy(estado.avisoComando, vinculo.aviso(), sizeof estado.avisoComando);
+  estado.avisoComandoMs = vinculo.avisoMs();
 }
 
 // ---------- Wi-Fi ----------
@@ -476,6 +578,7 @@ void tareaRed(void*) {
     atenderWifi(ahora);
     atenderHora();
     atenderBroker(ahora);
+    atenderComandos(ahora);
     publicarPendientes(ahora);
     publicarEstado();
     // Con cola pendiente y broker conectado se vacía rápido; si no, se revisa cada 50 ms
@@ -488,10 +591,13 @@ void tareaRed(void*) {
 void redIniciar() {
   colaLecturas = xQueueCreate(16, sizeof(Lectura));
   colaAcks = xQueueCreate(8, sizeof(int));
+  colaComandos = xQueueCreate(4, sizeof(MensajeComando));
   xTaskCreatePinnedToCore(tareaRed, "red", 8192, nullptr, 2, nullptr, 0);
 }
 
 bool redEncolar(const Lectura& l) { return colaLecturas && xQueueSend(colaLecturas, &l, 0) == pdTRUE; }
+
+void redPedirQr() { pedirQr = true; }
 
 EstadoRed redEstado() {
   EstadoRed e;

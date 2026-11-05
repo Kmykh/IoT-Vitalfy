@@ -1,4 +1,4 @@
-// caidas.h — Detección de caídas y nivel de actividad con el ADXL345 (100 Hz, ±16 g).
+// caidas.h — Detección de caídas y nivel de actividad con el acelerómetro (MPU6050 o ADXL345; 100 Hz, ±16 g).
 //
 // Máquina de estados basada en la nota AN-1023 de Analog Devices:
 //   1. Ingravidez: |a| < 0,75 g durante al menos 50 ms (el cuerpo cae).
