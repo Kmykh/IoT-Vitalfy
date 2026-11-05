@@ -17,7 +17,7 @@
 struct RedWifi {
   const char* ssid;
   const char* clave;
-  const char* broker;  // nullptr = MQTT_BROKER_POR_DEFECTO
+  const char* broker;  // nullptr = MQTT_BROKER_POR_DEFECTO (sin efecto con MQTT_BROKER_TLS)
 };
 #if __has_include("secretos.h")
 #include "secretos.h"
@@ -25,7 +25,24 @@ struct RedWifi {
 #error "Falta secretos.h: copia secretos.example.h como secretos.h y completa tus redes Wi-Fi y la clave MQTT."
 #endif
 
+// Producción: secretos.h define MQTT_BROKER_TLS (el dominio del servidor) y el wearable se conecta por TLS,
+// validando el certificado con las raíces de Let's Encrypt. Sin él, el broker de desarrollo de config.h.
+#ifdef MQTT_BROKER_TLS
+#include "raices_tls.h"
+#ifndef MQTT_PUERTO_TLS
+#define MQTT_PUERTO_TLS 8883
+#endif
+#endif
+
 namespace {
+
+#ifdef MQTT_BROKER_TLS
+const bool kTls = true;
+const int kPuertoBroker = MQTT_PUERTO_TLS;
+#else
+const bool kTls = false;
+const int kPuertoBroker = MQTT_PUERTO;
+#endif
 
 const int kRedes = sizeof(REDES_WIFI) / sizeof(REDES_WIFI[0]);
 const int kMaxCandidatos = 8;
@@ -78,6 +95,7 @@ char brokerIp[16] = "";
 uint32_t proximoIntentoBroker = 0;
 std::atomic<bool> mqttConectado{false}, mqttRechazado{false};
 std::atomic<int> erroresTransporte{0};
+std::atomic<bool> certificadoRechazado{false};  // TLS: el certificado del servidor no validó con RAICES_TLS
 bool mqttConectadoAntes = false;
 bool enVuelo = false;
 int idEnVuelo = -1;
@@ -108,6 +126,9 @@ const char* razonTexto(int r) {
 }
 
 const char* hostBroker() {
+#ifdef MQTT_BROKER_TLS
+  return MQTT_BROKER_TLS;  // el certificado se valida contra este nombre: nunca una IP ni un broker por red
+#endif
   const char* h = redActual >= 0 ? REDES_WIFI[redActual].broker : nullptr;
   return (h && *h) ? h : MQTT_BROKER_POR_DEFECTO;
 }
@@ -147,6 +168,7 @@ void manejadorMqtt(void*, esp_event_base_t, int32_t id, void* datos) {
       conexiones++;
       mqttConectado = true;
       mqttRechazado = false;
+      certificadoRechazado = false;
       erroresTransporte = 0;
       // Primero la suscripción: los comandos retenidos (QR o "vinculado") llegan apenas se suscribe
       esp_mqtt_client_subscribe(e->client, TOPICO_COMANDOS, 1);
@@ -178,6 +200,15 @@ void manejadorMqtt(void*, esp_event_base_t, int32_t id, void* datos) {
           mqttRechazado = true;
       } else if (e->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
         erroresTransporte++;
+        if (kTls && e->error_handle->esp_tls_cert_verify_flags != 0) {
+          certificadoRechazado = true;
+          Serial.printf("[red] TLS: el certificado del broker no se pudo validar (flags mbedTLS 0x%x)\n",
+                        (unsigned)e->error_handle->esp_tls_cert_verify_flags);
+        } else if (kTls && e->error_handle->esp_tls_last_esp_err != ESP_OK) {
+          Serial.printf("[red] TLS: fallo la conexion segura (%s, mbedTLS -0x%x)\n",
+                        esp_err_to_name(e->error_handle->esp_tls_last_esp_err),
+                        (unsigned)-e->error_handle->esp_tls_stack_err);
+        }
       }
       break;
     default:
@@ -187,9 +218,17 @@ void manejadorMqtt(void*, esp_event_base_t, int32_t id, void* datos) {
 
 void iniciarMqtt() {
   esp_mqtt_client_config_t cfg = {};
+  cfg.broker.address.port = kPuertoBroker;
+#ifdef MQTT_BROKER_TLS
+  // TLS: el dominio (no la IP resuelta) para el SNI y para validar el nombre del certificado
+  cfg.broker.address.hostname = MQTT_BROKER_TLS;
+  cfg.broker.address.transport = MQTT_TRANSPORT_OVER_SSL;
+  cfg.broker.verification.certificate = RAICES_TLS;  // PEM terminado en '\0': el largo lo calcula esp-mqtt
+  cfg.task.stack_size = 8192;                         // el handshake (mbedTLS) corre en la tarea de esp-mqtt
+#else
   cfg.broker.address.hostname = brokerIp;
-  cfg.broker.address.port = MQTT_PUERTO;
   cfg.broker.address.transport = MQTT_TRANSPORT_OVER_TCP;
+#endif
   cfg.credentials.client_id = CODIGO_DISPOSITIVO;
   cfg.credentials.username = CODIGO_DISPOSITIVO;
   if (MQTT_CLAVE[0]) cfg.credentials.authentication.password = MQTT_CLAVE;
@@ -199,7 +238,7 @@ void iniciarMqtt() {
   cfg.session.last_will.qos = 1;
   cfg.session.last_will.retain = 1;
   cfg.network.reconnect_timeout_ms = 3000;
-  cfg.network.timeout_ms = 5000;
+  cfg.network.timeout_ms = kTls ? 10000 : 5000;  // el handshake TLS tarda unos segundos en el ESP32
   cfg.buffer.size = 512;
   cfg.outbox.limit = 8 * 1024;
   if (cliente == nullptr) {
@@ -209,9 +248,11 @@ void iniciarMqtt() {
     esp_mqtt_set_config(cliente, &cfg);
   }
   mqttRechazado = false;
+  certificadoRechazado = false;
   erroresTransporte = 0;
   mqttIniciado = esp_mqtt_client_start(cliente) == ESP_OK;
-  Serial.printf("[red] MQTT: conectando a %s:%d como %s\n", brokerIp, MQTT_PUERTO, CODIGO_DISPOSITIVO);
+  Serial.printf("[red] MQTT: conectando a %s:%d%s como %s\n", hostBroker(), kPuertoBroker, kTls ? " (TLS)" : "",
+                CODIGO_DISPOSITIVO);
 }
 
 void detenerMqtt() {
@@ -244,6 +285,11 @@ bool resolverBroker(const char* host) {
 
 void atenderBroker(uint32_t ahora) {
   if (fase != Fase::Conectado) return;
+  // Con TLS se espera la hora del NTP: el certificado tiene fechas de validez y cada "ts" sale de ese reloj
+  if (kTls && !estado.horaSincronizada && !brokerResuelto) {
+    avisar("esperando hora NTP");
+    return;
+  }
   if (!brokerResuelto) {
     if ((int32_t)(ahora - proximoIntentoBroker) < 0) return;
     if (resolverBroker(hostBroker())) {
@@ -252,8 +298,10 @@ void atenderBroker(uint32_t ahora) {
     } else {
       proximoIntentoBroker = ahora + 5000;
       avisar("broker no encontrado");
-      Serial.printf("[red] No se encontro el broker \"%s\" (reintento en 5 s). Revisa que Mosquitto este "
-                    "corriendo y que la laptop este en la misma red.\n",
+      Serial.printf(kTls ? "[red] No se resolvio \"%s\" (reintento en 5 s). Revisa el dominio y que la red "
+                           "tenga salida a Internet.\n"
+                         : "[red] No se encontro el broker \"%s\" (reintento en 5 s). Revisa que Mosquitto este "
+                           "corriendo y que la laptop este en la misma red.\n",
                     hostBroker());
     }
     return;
@@ -262,8 +310,8 @@ void atenderBroker(uint32_t ahora) {
   const bool conectado = mqttConectado;
   if (conectado != mqttConectadoAntes) {
     mqttConectadoAntes = conectado;
-    Serial.printf(conectado ? "[red] MQTT conectado a %s:%d\n" : "[red] MQTT desconectado de %s:%d\n", brokerIp,
-                  MQTT_PUERTO);
+    Serial.printf(conectado ? "[red] MQTT conectado a %s:%d%s\n" : "[red] MQTT desconectado de %s:%d%s\n",
+                  hostBroker(), kPuertoBroker, kTls ? " (TLS)" : "");
     if (conectado)
       avisar("");
     else
@@ -272,6 +320,9 @@ void atenderBroker(uint32_t ahora) {
   if (mqttRechazado) {
     estado.broker = EstadoBroker::Rechazado;
     avisar("MQTT: usuario/clave?");
+  } else if (certificadoRechazado && !conectado) {
+    estado.broker = EstadoBroker::Conectando;
+    avisar("TLS: certificado?");
   } else {
     estado.broker = conectado ? EstadoBroker::Conectado : EstadoBroker::Conectando;
   }

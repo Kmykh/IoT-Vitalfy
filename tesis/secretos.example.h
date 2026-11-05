@@ -10,6 +10,17 @@ static const RedWifi REDES_WIFI[] = {
     {"<SSID del hotspot>", "<clave>", nullptr},
 };
 
-// Clave MQTT del dispositivo (su usuario es CODIGO_DISPOSITIVO). Debe coincidir con la que
-// tiene el broker en broker/.env (MQTT_DISPOSITIVOS). Vacía = broker sin autenticación.
-static const char MQTT_CLAVE[] = "<clave del dispositivo>";
+// Broker de producción (Vitalify/Backend/docs/despliegue.md). Con estas dos líneas el wearable se conecta
+// al dominio del servidor por el 8883 con TLS (raíces de Let's Encrypt en raices_tls.h) y no a la laptop;
+// el broker de cada red Wi-Fi deja de usarse. Coméntalas para volver al broker de desarrollo de config.h.
+#define MQTT_BROKER_TLS "<dominio del servidor, el DOMINIO de su .env>"
+#define MQTT_PUERTO_TLS 8883
+
+// Clave MQTT del dispositivo (su usuario es CODIGO_DISPOSITIVO). Vacía = broker sin autenticación.
+#ifdef MQTT_BROKER_TLS
+// La que se cargó en el servidor con scripts/agregar-wearable-mqtt.sh (deploy/mosquitto/secretos/passwd).
+static const char MQTT_CLAVE[] = "<clave del dispositivo en producción>";
+#else
+// La del broker de desarrollo, en broker/.env (MQTT_DISPOSITIVOS).
+static const char MQTT_CLAVE[] = "<clave del dispositivo en desarrollo>";
+#endif

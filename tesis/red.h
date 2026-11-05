@@ -8,8 +8,9 @@
 //   · Hora: NTP. Cada lectura guarda el instante en que se midió; si se midió sin hora, se le
 //     asigna al sincronizar (el backend exige "ts" real y deduplica por dispositivo + ts).
 //   · MQTT: cliente nativo de ESP-IDF (esp-mqtt) con QoS 1, reconexión automática y "last will"
-//     (device/<codigo>/estado = "offline"). El broker se ubica por nombre mDNS y se vuelve a
-//     resolver si la IP de la laptop cambió.
+//     (device/<codigo>/estado = "offline"). En desarrollo, el broker se ubica por nombre mDNS y se
+//     vuelve a resolver si la IP de la laptop cambió. En producción (MQTT_BROKER_TLS en secretos.h)
+//     va al dominio del servidor por el 8883 con TLS, después de tener hora NTP (raices_tls.h).
 //   · Búfer: sin red o sin broker, las lecturas se guardan (CAPACIDAD_BUFER_OFFLINE) y se envían
 //     en orden al volver. Una lectura sale del búfer solo cuando el broker confirma (PUBACK).
 //   · Vinculación (vinculacion.h): se suscribe a device/<codigo>/comandos. Solo publica telemetría
