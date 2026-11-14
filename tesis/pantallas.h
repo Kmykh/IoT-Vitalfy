@@ -15,17 +15,20 @@
 //   └──────────────────────────────┘
 //
 //   Sin vincular: el QR para la app de enfermería (y "Emparejando..." mientras registra al paciente)
-//   ┌──────────┬───────────────────┐
-//   │ ▓▓ QR ▓▓ │ ▂▄▆█ ☁            │
-//   │ ▓▓▓▓▓▓▓▓ │ Escanee con       │
-//   │ ▓▓▓▓▓▓▓▓ │ la app            │
-//   │ ▓▓▓▓▓▓▓▓ │ vence 9:32        │
-//   │ ▓▓▓▓▓▓▓▓ │ ESP32-001         │
+//   ┌──────────┬───────────────────┐          OLED 128x32 mientras tanto: los tres pasos
+//   │ ▓▓ QR ▓▓ │ ▂▄▆█ ☁            │          ┌──────────────────────────────┐
+//   │ ▓▓▓▓▓▓▓▓ │ ESP32-001         │          │ Escanee el QR            1/3 │
+//   │ ▓▓▓▓▓▓▓▓ │ Escanee           │          │  (1)·········(2)·········(3) │
+//   │ ▓▓▓▓▓▓▓▓ │ con la app        │          │  QR          App       Listo │
+//   │ ▓▓▓▓▓▓▓▓ │ vence 9:32        │          └──────────────────────────────┘
+//   │ ▓▓▓▓▓▓▓▓ │ ████████░░░░      │
 //   └──────────┴───────────────────┘
+//   Sin servidor todavía: Wi-Fi y servidor con ✓/○. Al vincular, 5 s de confirmación ("Vinculado",
+//   cama e iniciales); al desvincular, 5 s de "Desvinculado" antes del QR nuevo.
 //
 //   OLED ECG 128x32 durante el arranque (verificación)
 //   ┌──────────────────────────────┐
-//   │ Conectando MQTT          5/6 │          Arriba, lo primero que falta; el latido recorre
+//   │ Esperando servidor       5/6 │          Arriba, lo primero que falta; el latido recorre
 //   │ · · · ·_/\_·|\/·_^_· ●       │          la pantalla mientras tanto y la barra cuenta
 //   │ ███████████████████████░░░░░ │          los chequeos listos.
 //   └──────────────────────────────┘
@@ -90,7 +93,7 @@ void dibujarPrincipal(Adafruit_GFX& g, const VistaPrincipal& v);
 // paciente (docs/vinculacion-qr.md del backend). El QR se dibuja oscuro sobre claro, a 2 px por módulo,
 // en un cuadro claro de 64x64 (su margen de silencio) y a 4 px del borde de arriba: así la franja sin
 // píxeles de las OLED bicolor (entre las filas 15 y 16) no corta sus patrones de posición.
-enum class PantallaVinculo : uint8_t { Qr, Solicitando, Vencido, Emparejando };
+enum class PantallaVinculo : uint8_t { Qr, Solicitando, Vencido, Emparejando, Vinculado, Desvinculado };
 struct VistaVinculacion {
   PantallaVinculo pantalla = PantallaVinculo::Solicitando;
   const char* qr = "";
@@ -98,12 +101,20 @@ struct VistaVinculacion {
   const char* codigo = "";     // código del dispositivo
   int8_t wifiBarras = -1;
   uint8_t broker = 0;          // como en VistaPrincipal
+  const char* red = "";        // red Wi-Fi a la que está unido, o un aviso de conectividad
+  bool avisoRed = false;       // red es un aviso
+  const char* cama = "";       // al vincular (pantalla Vinculado)
+  const char* iniciales = "";
   uint32_t ms = 0;
 };
+const int kVigenciaQrS = 600;  // el backend da 10 min a cada QR (docs/vinculacion-qr.md): escala de la barra
 void dibujarVinculacion(Adafruit_GFX& g, const VistaVinculacion& v);
+// La OLED 128x32 mientras se vincula: qué hacer ahora y los tres pasos (QR, App, Listo).
+void dibujarPasosVinculo(Adafruit_GFX& g, const VistaVinculacion& v);
 
-// Pantalla de arranque: chequeo del hardware y de la conexión. No sigue mientras falte un sensor o
-// los electrodos del ECG (el botón BOOT permite seguir igual) y espera al broker hasta 25 s.
+// Pantalla de arranque: chequeo del hardware y de la conexión. No sigue mientras falte un sensor (el
+// botón BOOT permite seguir igual) y espera al broker hasta 25 s. Los electrodos no se esperan: van en el
+// paciente después de vincular (la pantalla "Conecte al paciente" los pide).
 struct VistaArranque {
   const char* version = "";
   const char* codigo = "";

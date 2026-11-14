@@ -366,26 +366,64 @@ uint8_t estadoBroker(const EstadoRed& red) {
   }
 }
 
-// Sin vincular a un paciente, la OLED principal muestra el QR (o "Emparejando..." mientras la enfermera
-// registra al paciente). Recién encendido, mientras no llega ningún comando, sigue el flujo normal.
-bool mostrarVinculacion(const EstadoRed& red) {
-  return red.vinculo == EstadoVinculo::EsperandoQr || red.vinculo == EstadoVinculo::Emparejando;
+// Al cambiar la vinculación, una pantalla de 5 s: la confirmación al vincular (desde el QR o el
+// emparejamiento; al reconectarse ya vinculado no se muestra) y el aviso al desvincular.
+const uint32_t kMsPantallaCambioVinculo = 5000;
+bool hayCambioVinculo = false;
+PantallaVinculo pantallaCambioVinculo = PantallaVinculo::Vinculado;
+uint32_t msCambioVinculo = 0;
+
+void seguirVinculo(uint32_t ahora, const EstadoRed& red) {
+  static EstadoVinculo anterior = EstadoVinculo::Desconocido;
+  if (red.vinculo == anterior) return;
+  const bool vinculo = red.vinculo == EstadoVinculo::Vinculado &&
+                       (anterior == EstadoVinculo::EsperandoQr || anterior == EstadoVinculo::Emparejando);
+  const bool desvinculo = anterior == EstadoVinculo::Vinculado && red.vinculo == EstadoVinculo::EsperandoQr;
+  hayCambioVinculo = vinculo || desvinculo;
+  pantallaCambioVinculo = vinculo ? PantallaVinculo::Vinculado : PantallaVinculo::Desvinculado;
+  msCambioVinculo = ahora;
+  anterior = red.vinculo;
 }
 
+bool mostrandoCambioVinculo(uint32_t ahora) {
+  return hayCambioVinculo && ahora - msCambioVinculo < kMsPantallaCambioVinculo;
+}
+
+// Sin vincular a un paciente, la OLED principal muestra el QR (o "Emparejando..." mientras la enfermera
+// registra al paciente). Recién encendido (sin ningún comando todavía): si el wearable no está en un
+// paciente, cómo va la conexión con el servidor; si lo está (pudo reiniciarse vinculado y sin red), sigue
+// mostrando los signos.
+bool mostrarVinculacion(uint32_t ahora, const EstadoRed& red) {
+  if (mostrandoCambioVinculo(ahora)) return true;
+  if (red.vinculo == EstadoVinculo::EsperandoQr || red.vinculo == EstadoVinculo::Emparejando) return true;
+  return red.vinculo == EstadoVinculo::Desconocido && !sesion.monitoreando();
+}
+
+// red debe seguir viva mientras se use la vista (v.red, v.cama y v.iniciales apuntan a sus textos)
 VistaVinculacion vistaVinculacion(uint32_t ahora, const EstadoRed& red) {
   VistaVinculacion v;
   v.codigo = CODIGO_DISPOSITIVO;
   v.wifiBarras = barrasWifi(red);
   v.broker = estadoBroker(red);
+  v.avisoRed = red.aviso[0] != 0;
+  v.red = v.avisoRed ? red.aviso : red.ssid;
+  v.cama = red.cama;
+  v.iniciales = red.iniciales;
   v.ms = ahora;
   v.qr = red.qr;
   const int64_t ahoraMs = red.horaSincronizada ? (int64_t)time(nullptr) * 1000 : 0;
-  if (ahoraMs > 0 && red.qrExpiraMs > 0) {
-    const int64_t falta = (red.qrExpiraMs - ahoraMs) / 1000;
+  // Cuánto le queda al QR o, emparejando, a la app para confirmar
+  const int64_t expiraMs = red.vinculo == EstadoVinculo::Emparejando ? red.emparejandoExpiraMs : red.qrExpiraMs;
+  if (ahoraMs > 0 && expiraMs > 0) {
+    const int64_t falta = (expiraMs - ahoraMs) / 1000;
     v.segundosRestantes = falta > 0 ? (int)falta : 0;
   }
-  if (red.vinculo == EstadoVinculo::Emparejando)
+  if (mostrandoCambioVinculo(ahora))
+    v.pantalla = pantallaCambioVinculo;
+  else if (red.vinculo == EstadoVinculo::Emparejando)
     v.pantalla = PantallaVinculo::Emparejando;
+  else if (red.vinculo == EstadoVinculo::Desconocido)
+    v.pantalla = PantallaVinculo::Solicitando;
   else if (!red.qr[0])
     v.pantalla = PantallaVinculo::Solicitando;
   else if (ahoraMs > 0 && red.qrExpiraMs > 0 && ahoraMs >= red.qrExpiraMs)
@@ -395,9 +433,10 @@ VistaVinculacion vistaVinculacion(uint32_t ahora, const EstadoRed& red) {
   return v;
 }
 
-// Listo para seguir: los cuatro sensores responden y los electrodos del ECG están conectados
+// Listo para seguir: los cuatro sensores responden. Los electrodos no se esperan: se colocan en el
+// paciente después de vincular (la pantalla "Conecte al paciente" los pide).
 bool sensoresListos() {
-  return ppgOk && acelOk && tempPresente() && ecgModuloPresente() && ecg.resultado().electrodos;
+  return ppgOk && acelOk && tempPresente() && ecgModuloPresente();
 }
 
 // Arranque: el chequeo no sigue mientras falte un sensor (se puede conectar en caliente: se reintenta
@@ -416,10 +455,9 @@ bool enArranque(uint32_t ahora, const EstadoRed& red) {
   static uint32_t tAviso = 0;
   if (!sensoresListos() && ahora - tAviso >= 5000) {
     tAviso = ahora;
-    Serial.printf("Arranque: esperando%s%s%s%s%s (BOOT = seguir igual)\n", ppgOk ? "" : " MAX30102",
+    Serial.printf("Arranque: esperando%s%s%s%s (BOOT = seguir igual)\n", ppgOk ? "" : " MAX30102",
                   acelOk ? "" : " MPU6050", tempPresente() ? "" : " DS18B20",
-                  ecgModuloPresente() ? "" : " modulo AD8232",
-                  ecgModuloPresente() && !ecg.resultado().electrodos ? " electrodos del ECG" : "");
+                  ecgModuloPresente() ? "" : " modulo AD8232");
   }
   if (sensoresListos() && redLista) {
     if (!listoDesde) listoDesde = ahora;
@@ -427,7 +465,7 @@ bool enArranque(uint32_t ahora, const EstadoRed& red) {
     listoDesde = 0;
   }
   terminado = listoDesde && ahora - listoDesde >= 2500;
-  if (terminado) Serial.println("Arranque completo: sensores y electrodos conectados");
+  if (terminado) Serial.println("Arranque completo: los cuatro sensores responden");
   arranqueTerminado = terminado;
   return !terminado;
 }
@@ -459,16 +497,21 @@ VistaArranque vistaArranque(uint32_t ahora, const EstadoRed& red) {
 }
 
 // Cada OLED tiene lo suyo. Durante el arranque, la principal muestra la lista de chequeos y la de
-// 128x32, la verificación animada; después, la principal muestra los signos y la de 128x32, el ECG.
+// 128x32, la verificación animada. Mientras se vincula, la principal muestra el QR (o la conexión) y la
+// de 128x32, los tres pasos. Vinculado, la principal muestra los signos y la de 128x32, el ECG.
 void actualizarPantallas(uint32_t ahora) {
   static uint32_t tPrincipal = 0, tEcg = 0;
   const EstadoRed red = redEstado();
   const bool arranque = enArranque(ahora, red);  // en cada vuelta, para no perder un toque de BOOT
+  seguirVinculo(ahora, red);
+  const bool vinculando = !arranque && mostrarVinculacion(ahora, red);
 
   if (oledEcgOk && ahora - tEcg >= 40) {  // 25 cuadros/s: el barrido y la animación se ven fluidos
     tEcg = ahora;
     if (arranque)
       dibujarVerificacion(oledEcg, vistaArranque(ahora, red));
+    else if (vinculando)
+      dibujarPasosVinculo(oledEcg, vistaVinculacion(ahora, red));
     else
       dibujarEcg(oledEcg, barrido, vistaEcg(ahora));
     oledEcg.display();
@@ -478,14 +521,15 @@ void actualizarPantallas(uint32_t ahora) {
   tPrincipal = ahora;
   if (arranque)
     dibujarArranque(oled, vistaArranque(ahora, red));
-  else if (mostrarVinculacion(red))
+  else if (vinculando)
     dibujarVinculacion(oled, vistaVinculacion(ahora, red));
   else
     dibujarPrincipal(oled, vistaPrincipal(ahora, red));
   oled.display();
 }
 
-// Botón BOOT, terminado el arranque: mientras se espera el escaneo, pide un QR nuevo al backend
+// Botón BOOT, terminado el arranque: mientras se espera el escaneo (o se empareja), pide un QR nuevo al
+// backend. Si la app todavía puede confirmar, el backend responde "emparejando" y no se pierde nada.
 void atenderBoton(uint32_t ahora) {
   static bool antes = false;
   static uint32_t tCambio = 0;
@@ -494,7 +538,8 @@ void atenderBoton(uint32_t ahora) {
   antes = pulsado;
   tCambio = ahora;
   if (!pulsado || !arranqueTerminado) return;
-  if (redEstado().vinculo == EstadoVinculo::EsperandoQr) {
+  const EstadoVinculo vinculo = redEstado().vinculo;
+  if (vinculo == EstadoVinculo::EsperandoQr || vinculo == EstadoVinculo::Emparejando) {
     redPedirQr();
     Serial.println("Boton: se pide un QR nuevo");
   }

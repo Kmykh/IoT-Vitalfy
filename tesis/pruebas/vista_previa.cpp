@@ -51,24 +51,62 @@ int main() {
   vq.codigo = "ESP32-001";
   vq.wifiBarras = 3;
   vq.broker = 2;
+  vq.ms = 400;
   dibujarVinculacion(principal, vq);
   guardar(principal, "00a_vinculacion_qr");
+  dibujarPasosVinculo(ecg, vq);
+  guardar(ecg, "00a_vinculacion_qr_oled_ecg");
+
+  // Antes del QR: sin Wi-Fi, con Wi-Fi y sin servidor, y con servidor (pidiendo el QR)
+  VistaVinculacion vc = vq;
+  vc.pantalla = PantallaVinculo::Solicitando;
+  vc.wifiBarras = -1;
+  vc.broker = 0;
+  vc.ms = 1200;
+  dibujarVinculacion(principal, vc);
+  guardar(principal, "00b1_conectando_sin_wifi");
+  dibujarPasosVinculo(ecg, vc);
+  guardar(ecg, "00b1_conectando_sin_wifi_oled_ecg");
+  vc.wifiBarras = 3;
+  vc.broker = 1;
+  vc.red = "Iphone de Mayck";
+  dibujarVinculacion(principal, vc);
+  guardar(principal, "00b2_conectando_servidor");
   vq.pantalla = PantallaVinculo::Solicitando;
   vq.ms = 800;
   dibujarVinculacion(principal, vq);
-  guardar(principal, "00b_vinculacion_pidiendo_qr");
+  guardar(principal, "00b3_pidiendo_qr");
+
   vq.pantalla = PantallaVinculo::Vencido;
   dibujarVinculacion(principal, vq);
   guardar(principal, "00c_vinculacion_qr_vencido");
   vq.pantalla = PantallaVinculo::Emparejando;
+  vq.segundosRestantes = 272;  // lo que le queda a la app para confirmar (emparejando trae "expira")
   vq.ms = 1200;
   dibujarVinculacion(principal, vq);
   guardar(principal, "00d_emparejando");
+  dibujarPasosVinculo(ecg, vq);
+  guardar(ecg, "00d_emparejando_oled_ecg");
+  vq.segundosRestantes = 0;  // venció sin confirmar: pide un QR nuevo
+  dibujarVinculacion(principal, vq);
+  guardar(principal, "00d2_emparejando_vencido");
+
+  // Los 5 s al cambiar la vinculación
+  vq.pantalla = PantallaVinculo::Vinculado;
+  vq.cama = "MED-B-01";
+  vq.iniciales = "R.M.";
+  dibujarVinculacion(principal, vq);
+  guardar(principal, "00e_vinculado");
+  dibujarPasosVinculo(ecg, vq);
+  guardar(ecg, "00e_vinculado_oled_ecg");
+  vq.pantalla = PantallaVinculo::Desvinculado;
+  dibujarVinculacion(principal, vq);
+  guardar(principal, "00f_desvinculado");
 
   VistaArranque a;
   a.version = "2.0.0";
   a.codigo = "ESP32-001";
-  a.ppg = a.acelerometro = a.temperatura = a.ecgModulo = true;  // faltan los electrodos: no sigue
+  a.ppg = a.acelerometro = a.temperatura = a.ecgModulo = true;  // los cuatro sensores; falta la red
   a.ms = 400;
   dibujarArranque(principal, a);
   guardar(principal, "01a_arranque_conectando");
