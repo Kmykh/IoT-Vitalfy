@@ -132,6 +132,7 @@ void setup() {
   Serial.printf("OLED %s | OLED ECG %s | MAX30102 %s | %s %s | DS18B20 %s\n", oledOk ? "OK" : "FALTA",
                 oledEcgOk ? "OK" : "FALTA", ppgOk ? "OK" : "FALTA", acelOk ? acelNombre() : "MPU6050",
                 acelOk ? "OK" : "FALTA", tempPresente() ? "OK" : "FALTA");
+  if (!acelOk && acelDiagnostico()[0]) Serial.printf("Acelerometro: %s\n", acelDiagnostico());
   tDatosPpg = tDatosAcel = millis();
   enableLoopWDT();  // si el loop se colgara más de 5 s, el ESP32 se reinicia solo
 }

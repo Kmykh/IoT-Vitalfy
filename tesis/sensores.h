@@ -34,6 +34,8 @@ bool acelIniciar(TwoWire& bus);
 int acelLeer(float* ax, float* ay, float* az, int max);  // en g
 ModeloAcel acelModelo();
 const char* acelNombre();  // "MPU6050", "ADXL345" o "acelerometro" (para el monitor serie)
+// Si un chip responde en 0x68/0x69 pero no se pudo usar: su WHO_AM_I y por qué ("" si no hubo problema)
+const char* acelDiagnostico();
 
 // ---------- DS18B20 (temperatura, 1-Wire) ----------
 // Conversión de 12 bits (0,0625 °C) sin bloquear: una lectura cada ~2 s, mediana de las 3 últimas.
