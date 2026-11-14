@@ -148,12 +148,16 @@ Cada OLED tiene su función: la principal muestra el chequeo y los signos, y la 
 
 | Momento | OLED principal (128x64) | OLED del ECG (128x32) | LED verde |
 |---|---|---|---|
-| Arranque | Chequeo de SpO2, Acel, Temp, ECG, Wi-Fi y MQTT (`01a`, `01b`) | Verificación animada: qué falta, `n/6`, latido y barra de progreso (`12`, `13`) | Se enciende cuando todo responde |
-| Sin vincular | El QR para la app de la enfermera, cuánto le queda y el código del sensor (`00a`); "Pidiendo el QR" (`00b`), "Código QR vencido" (`00c`) o "Emparejando" mientras registra al paciente (`00d`) | ECG | Encendido si el equipo está bien |
+| Arranque | Chequeo de SpO2, Acel, Temp, ECG, Wi-Fi y servidor (`01a`, `01b`) | Verificación animada: qué falta, `n/6`, latido y barra de progreso (`12`, `13`) | Se enciende cuando todo responde |
+| Sin servidor todavía | "Conectando": Wi-Fi y servidor con ✓ u ○, y abajo la red o "Use una red 2,4 GHz" (`00b1`, `00b2`) | Los tres pasos de la vinculación (`00b1`) | Apagado |
+| Sin vincular | El QR para la app de la enfermera, el código del sensor, cuánto le queda y una barra que se vacía en los 10 min (`00a`); "Pidiendo QR" (`00b3`), "QR vencido" (`00c`) o "Emparejando" mientras registra al paciente (`00d`) | Los tres pasos: QR → App → Listo, con el actual parpadeando (`00a`, `00d`) | Encendido si el equipo está bien |
+| Al vincular / desvincular | 5 s de "✓ Vinculado" con la cama y las iniciales (`00e`), o de "Desvinculado" antes del QR nuevo (`00f`) | Los tres pasos completos (`00e`) | Encendido si el equipo está bien |
 | Espera del paciente | "Conecte al paciente" con ✓, ○ o ✗ por sensor (`01c`, `01d`) | ECG; sin electrodos, "Electrodos desconectados" (`11`) | Encendido si el equipo está bien |
 | Monitoreo | Signos: FC, SpO2, temperatura y alerta de caída (`02` a `09`) | ECG en barrido con la FC del ECG (`10`); con mala señal, "Señal con ruido" (`11b`) | Encendido si el equipo está bien |
 
-**Arranque.** La pantalla de chequeo muestra SpO2, Acel, Temp, ECG, Wi-Fi y MQTT. En el ECG: `NO` = el módulo AD8232 no responde, `--` = responde pero los electrodos no están conectados, `OK` = electrodos conectados (el AD8232 solo los detecta sobre la piel). **No sigue mientras algún sensor diga NO o el ECG diga `--`** (se reintenta solo: puedes conectarlos en caliente); con todo OK espera la conexión al broker hasta 25 s y muestra "Todo conectado". El botón **BOOT** de la placa sigue igual aunque falte algo.
+**Arranque.** La pantalla de chequeo muestra SpO2, Acel, Temp, ECG (el módulo AD8232), Wi-Fi y servidor (el broker MQTT). **No sigue mientras algún sensor diga NO** (se reintenta solo: puedes conectarlos en caliente); con todo OK espera la conexión al broker hasta 25 s y muestra "Todo conectado". El botón **BOOT** de la placa sigue igual aunque falte algo. Los electrodos ya no se esperan aquí: con la vinculación por QR se colocan en el paciente después de vincular, y la pantalla "Conecte al paciente" los pide. Si un chip responde en 0x68/0x69 pero no se reconoce, el monitor serie dice su `WHO_AM_I` (se aceptan el MPU6050 y sus variantes MPU6500, 6515, 9250 y 9255; el de este GY-521 es un MPU-6515, `0x74`).
+
+**Antes del QR.** Recién encendido, mientras el backend no le dice nada y si no está en un paciente, la OLED principal muestra "Conectando" con el Wi-Fi y el servidor. Si ninguna red de `secretos.h` está a la vista, el monitor serie lista las que sí ve. El ESP32 solo usa **2,4 GHz**: el hotspot de un iPhone necesita *Maximizar compatibilidad*. El nombre de la red se compara sin distinguir mayúsculas (`Iphone` encuentra `iPhone`).
 
 **Sesión de monitoreo** (`tesis/sesion.h`). Al encender, tras el chequeo de arranque, el equipo queda en **espera del paciente**: la pantalla "Conecte al paciente" marca cada sensor con ✓ (en el paciente), ○ (falta colocarlo) o ✗ (no instalado), y **no se envía nada al backend** (tampoco caídas: mover la placa sin paciente no es una caída). **Poner el dedo en el oxímetro (1 s) inicia el monitoreo**; desde ahí cada sensor se usa y se envía apenas se conecta (los electrodos o la sonda pueden ponerse después). La sesión termina tras 60 s sin dedo, sin electrodos y sin sonda en la piel. Si el oxímetro no está instalado, inicia con los electrodos o la sonda.
 
@@ -173,7 +177,7 @@ Cada OLED tiene su función: la principal muestra el chequeo y los signos, y la 
 
 Sin dedo ni electrodos muestra el código del dispositivo, la red y la indicación de colocar el dedo.
 
-**OLED del ECG (128x32).** Durante el arranque muestra su propia verificación: arriba, lo que falta ahora (`Conecte electrodos`, `Buscando Wi-Fi`, `Conectando MQTT`…) y cuántos de los seis chequeos están listos; en medio, un latido animado que recorre la pantalla, y abajo, una barra de progreso. Al terminar dice `Todo listo 6/6` y pasa al ECG: trazo en barrido como en un monitor de cabecera (escala automática, ~3 s de trazo) y, a la derecha, la FC calculada del ECG con un corazón que late con cada QRS. El trazo es una línea fina y solo los QRS se dibujan de mínimo a máximo, así el ruido leve no lo engrosa. Sin electrodos parpadea "Electrodos desconectados". Si la señal es inservible (mucha interferencia de 60 Hz o el AD8232 saturado), en vez de dibujar el ruido muestra "Señal con ruido" y alterna "Fije electrodos" con "Revise el RL", y el ECG no informa FC. La OLED principal nunca muestra el ECG.
+**OLED del ECG (128x32).** Durante el arranque muestra su propia verificación: arriba, lo que falta ahora (`Falta acelerometro`, `Buscando Wi-Fi`, `Esperando servidor`…) y cuántos de los seis chequeos están listos; en medio, un latido animado que recorre la pantalla, y abajo, una barra de progreso. Al terminar dice `Todo listo 6/6`. Mientras se vincula muestra los tres pasos (QR, App, Listo) y qué hacer ahora (`Escanee el QR`, `Registrando...`, `Listo: MED-B-01`). Vinculado, pasa al ECG: trazo en barrido como en un monitor de cabecera (escala automática, ~3 s de trazo) y, a la derecha, la FC calculada del ECG con un corazón que late con cada QRS. El trazo es una línea fina y solo los QRS se dibujan de mínimo a máximo, así el ruido leve no lo engrosa. Sin electrodos parpadea "Electrodos desconectados". Si la señal es inservible (mucha interferencia de 60 Hz o el AD8232 saturado), en vez de dibujar el ruido muestra "Señal con ruido" y alterna "Fije electrodos" con "Revise el RL", y el ECG no informa FC. La OLED principal nunca muestra el ECG.
 
 `tesis/pruebas/vista_previa.sh` regenera `pantallas_oled.png` con el código real del firmware.
 
@@ -206,9 +210,9 @@ El wearable se asigna a un paciente escaneando el QR de su OLED con la app de en
 | Comando | Pantalla | Telemetría |
 |---|---|---|
 | `mostrar-qr` (retenido) | El QR (`VTF1:ESP32-001:K7P3QX9M`) y cuánto le queda | No envía y descarta lo guardado |
-| `emparejando` | "Emparejando": la enfermera está registrando al paciente | No envía |
-| `vinculado` (retenido) | El flujo normal, con la cama y las iniciales | Envía cada 10 s y al instante si hay una caída |
-| `desvinculado` (retenido) | Pide el QR nuevo (llega enseguida) | No envía y descarta lo guardado (era del paciente anterior) |
+| `emparejando` | "Emparejando" con cuánto le queda a la app (`expira`). Si vence sin `vinculado`, pide un QR nuevo solo (sin hora o sin `expira`, a los 6 min); BOOT también lo pide | No envía |
+| `vinculado` (retenido) | 5 s de "✓ Vinculado" (si venía del QR o del emparejamiento) y después el flujo normal, con la cama y las iniciales | Envía cada 10 s y al instante si hay una caída |
+| `desvinculado` (retenido) | 5 s de "Desvinculado" y pide el QR nuevo (llega enseguida) | No envía y descarta lo guardado (era del paciente anterior) |
 | `repetir-medicion` | Aviso de 15 s en la fila inferior | Sin cambio |
 
 - Al conectarse, se suscribe a sus comandos antes de publicar `online`: el comando retenido le dice enseguida si sigue vinculado. Hasta recibirlo no vacía el búfer.
