@@ -69,6 +69,7 @@ struct Candidato {
   uint8_t bssid[6];
   bool visto;  // apareció en el escaneo (si no, puede ser una red oculta)
   int32_t rssi;
+  char ssid[33];  // el nombre tal como lo anuncia la red ("iPhone" aunque secretos.h diga "Iphone")
 };
 Candidato candidatos[kMaxCandidatos];
 int nCandidatos = 0, iCandidato = 0, redActual = -1;
@@ -462,13 +463,15 @@ void esperarYReintentar(uint32_t ahora) {
   estado.wifi = EstadoWifi::Buscando;
 }
 
-// Redes conocidas visibles (la mejor señal primero); al final las no vistas, por si son ocultas
+// Redes conocidas visibles (la mejor señal primero); al final las no vistas, por si son ocultas.
+// El nombre se compara sin distinguir mayúsculas ("Iphone de X" en secretos.h encuentra "iPhone de X"):
+// se conecta con el nombre exacto que anuncia la red.
 void armarCandidatos(int encontradas) {
   nCandidatos = 0;
   for (int i = 0; i < encontradas; i++) {
     const String ssid = WiFi.SSID(i);
     for (int r = 0; r < kRedes; r++) {
-      if (ssid != REDES_WIFI[r].ssid) continue;
+      if (strcasecmp(ssid.c_str(), REDES_WIFI[r].ssid) != 0) continue;
       const int32_t rssi = WiFi.RSSI(i);
       int k = 0;
       while (k < nCandidatos && candidatos[k].red != r) k++;
@@ -478,9 +481,21 @@ void armarCandidatos(int encontradas) {
         nCandidatos++;
       }
       Candidato& c = candidatos[k];
-      c = {r, WiFi.channel(i), {}, true, rssi};
+      c = {r, WiFi.channel(i), {}, true, rssi, {}};
       memcpy(c.bssid, WiFi.BSSID(i), 6);
+      strlcpy(c.ssid, ssid.c_str(), sizeof c.ssid);
     }
+  }
+  if (nCandidatos == 0 && encontradas > 0) {  // ninguna conocida a la vista: cuáles sí hay (2,4 GHz)
+    char lista[160] = "";
+    for (int i = 0; i < encontradas && i < 8; i++) {
+      if (i > 0) strlcat(lista, ", ", sizeof lista);
+      strlcat(lista, "\"", sizeof lista);
+      strlcat(lista, WiFi.SSID(i).c_str(), sizeof lista);
+      strlcat(lista, "\"", sizeof lista);
+    }
+    Serial.printf("[red] Wi-Fi: ninguna red de secretos.h a la vista; se ven %d: %s%s\n", encontradas, lista,
+                  encontradas > 8 ? "..." : "");
   }
   for (int a = 1; a < nCandidatos; a++)  // de mejor a peor señal
     for (int b = a; b > 0 && candidatos[b].rssi > candidatos[b - 1].rssi; b--) {
@@ -491,7 +506,11 @@ void armarCandidatos(int encontradas) {
   for (int r = 0; r < kRedes && nCandidatos < kMaxCandidatos; r++) {
     bool esta = false;
     for (int k = 0; k < nCandidatos; k++) esta |= candidatos[k].red == r;
-    if (!esta) candidatos[nCandidatos++] = {r, 0, {}, false, -127};
+    if (!esta) {
+      candidatos[nCandidatos] = {r, 0, {}, false, -127, {}};
+      strlcpy(candidatos[nCandidatos].ssid, REDES_WIFI[r].ssid, sizeof candidatos[nCandidatos].ssid);
+      nCandidatos++;
+    }
   }
 }
 
@@ -499,19 +518,19 @@ void conectar(uint32_t ahora) {
   const Candidato& c = candidatos[iCandidato];
   const RedWifi& r = REDES_WIFI[c.red];
   if (c.visto)
-    Serial.printf("[red] Wi-Fi: conectando a \"%s\" (%d dBm, canal %d)\n", r.ssid, (int)c.rssi, (int)c.canal);
+    Serial.printf("[red] Wi-Fi: conectando a \"%s\" (%d dBm, canal %d)\n", c.ssid, (int)c.rssi, (int)c.canal);
   else
-    Serial.printf("[red] Wi-Fi: \"%s\" no aparecio en el escaneo; se intenta igual\n", r.ssid);
+    Serial.printf("[red] Wi-Fi: \"%s\" no aparecio en el escaneo; se intenta igual\n", c.ssid);
   WiFi.disconnect();  // corta el intento anterior: con uno en curso, begin() falla ("sta is connecting")
   razonDesconexion = 0;
   if (c.visto)
-    WiFi.begin(r.ssid, r.clave, c.canal, c.bssid);
+    WiFi.begin(c.ssid, r.clave, c.canal, c.bssid);
   else
-    WiFi.begin(r.ssid, r.clave);
+    WiFi.begin(c.ssid, r.clave);
   fase = Fase::Conectando;
   tFase = ahora;
   estado.wifi = EstadoWifi::Conectando;
-  strlcpy(estado.ssid, r.ssid, sizeof estado.ssid);
+  strlcpy(estado.ssid, c.ssid, sizeof estado.ssid);
 }
 
 void alConectar(uint32_t ahora) {
@@ -563,7 +582,7 @@ void atenderWifi(uint32_t ahora) {
       const bool propia = razon == WIFI_REASON_ASSOC_LEAVE || razon == WIFI_REASON_STA_LEAVING;
       const bool fallo = razon != 0 && !propia && ahora - tFase > 2000;
       if (!fallo && ahora - tFase < kTiempoConexionMs) break;
-      Serial.printf("[red] Wi-Fi: no se pudo conectar a \"%s\" (%s)\n", REDES_WIFI[candidatos[iCandidato].red].ssid,
+      Serial.printf("[red] Wi-Fi: no se pudo conectar a \"%s\" (%s)\n", candidatos[iCandidato].ssid,
                     razonTexto(razon));
       if (razon == WIFI_REASON_AUTH_FAIL || razon == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
           razon == WIFI_REASON_HANDSHAKE_TIMEOUT)
