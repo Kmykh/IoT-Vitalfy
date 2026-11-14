@@ -3,14 +3,15 @@
 //
 // El backend publica en device/<codigo>/comandos (QoS 1; los marcados con R van retenidos):
 //   {"accion":"mostrar-qr","qr":"VTF1:ESP32-001:K7P3QX9M","expira":"2026-11-02T15:10:00Z"}   R
-//   {"accion":"emparejando"}
+//   {"accion":"emparejando","expira":"2026-11-02T15:05:00Z"}    (expira: hasta cuándo puede confirmar la app)
 //   {"accion":"vinculado","cama":"MED-B-01","iniciales":"R.M."}                              R
 //   {"accion":"desvinculado"}                                                                R
 //   {"accion":"repetir-medicion","variable":"presion","motivo":"..."}
 //
 //   Desconocido ──(primer comando)──> EsperandoQr ──emparejando──> Emparejando ──vinculado──> Vinculado
-//   (al arrancar)                          ^                                                       │
-//                                          └───────── mostrar-qr / desvinculado ───────────────────┘
+//   (al arrancar)                       ^      ^                        │                          │
+//                                       │      └── vence el escaneo ────┘ (pide un QR nuevo)       │
+//                                       └───────────── mostrar-qr / desvinculado ──────────────────┘
 //
 // · Solo en Vinculado se publica telemetría. Al salir de Vinculado (o al saber que no lo estaba) se
 //   descarta el búfer offline: esas lecturas eran del paciente anterior.
@@ -18,7 +19,9 @@
 //   cambiar mientras el wearable estaba fuera de línea).
 // · Desconocido (recién encendido, sin broker): se guardan las lecturas por si sigue vinculado.
 // · Se pide un QR ({"accion":"solicitar-qr"} en device/<codigo>/solicitudes) si al conectarse no llega
-//   ningún comando en 5 s, si el QR venció o si se pulsa el botón; como máximo uno cada 10 s.
+//   ningún comando en 5 s, si el QR venció, si venció el escaneo (emparejando sin vinculado: a su
+//   "expira", o a los 6 min si no hay hora o el backend no la mandó) o si se pulsa el botón; como máximo
+//   uno cada 10 s. Si la app todavía puede confirmar, el backend responde "emparejando" otra vez.
 // C++ puro: se prueba en el computador (pruebas/).
 #pragma once
 
@@ -74,6 +77,10 @@ class Vinculacion {
  public:
   static const uint32_t kEsperaPrimerComandoMs = 5000;
   static const uint32_t kEntreSolicitudesMs = 10000;
+  // Emparejando sin "expira" (o sin hora NTP): el backend da 5 min para confirmar; se espera 1 más
+  static const uint32_t kEsperaEmparejandoMs = 6 * 60 * 1000;
+  // Con "expira": unos segundos después, para que el reloj del backend también lo vea vencido
+  static const int64_t kMargenVencimientoMs = 3000;
 
   void alConectar(uint32_t ms);
   void alDesconectar();
@@ -86,10 +93,13 @@ class Vinculacion {
   // ¿Hay que publicar solicitar-qr ahora? ahoraEpochMs = 0 si todavía no hay hora NTP.
   bool debeSolicitarQr(uint32_t ms, int64_t ahoraEpochMs, bool botonPulsado);
   bool qrVencido(int64_t ahoraEpochMs) const { return ahoraEpochMs > 0 && expiraMs_ > 0 && ahoraEpochMs >= expiraMs_; }
+  // Emparejando sin que llegue "vinculado": la app ya no puede confirmar (el backend renueva el QR).
+  bool emparejamientoVencido(uint32_t ms, int64_t ahoraEpochMs) const;
 
   EstadoVinculo estado() const { return estado_; }
   const char* qr() const { return qr_; }
   int64_t expiraMs() const { return expiraMs_; }
+  int64_t emparejandoExpiraMs() const { return emparejandoExpiraMs_; }  // 0 = sin dato
   const char* cama() const { return cama_; }
   const char* iniciales() const { return iniciales_; }
   const char* aviso() const { return aviso_; }  // del último repetir-medicion
@@ -103,6 +113,6 @@ class Vinculacion {
   bool conectado_ = false, comandoEnEstaConexion_ = false, solicitoAlguna_ = false;
   uint32_t conectadoMs_ = 0, ultimaSolicitudMs_ = 0, desdeMs_ = 0, avisoMs_ = 0;
   char qr_[72] = "";
-  int64_t expiraMs_ = 0;
+  int64_t expiraMs_ = 0, emparejandoExpiraMs_ = 0;
   char cama_[24] = "", iniciales_[12] = "", aviso_[64] = "";
 };

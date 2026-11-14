@@ -46,6 +46,7 @@ const uint8_t kFifoEscritura = 0x04, kFifoDesborde = 0x05, kFifoLectura = 0x06, 
 TwoWire* busAcel = nullptr;
 ModeloAcel modeloAcel = ModeloAcel::Ninguno;
 uint8_t dirAcel = 0;
+char diagnosticoAcel[64] = "";
 
 // ADXL345
 const uint8_t kDirAdxl = 0x53;
@@ -61,9 +62,10 @@ const float kGPorBitMpu = 1.0f / 2048.0f;  // ±16 g: 2048 cuentas por g (0,49 m
 const int kMuestrasPorLecturaMpu = 21;     // 126 bytes: el búfer de Wire en el ESP32 es de 128
 
 bool esMpu(uint8_t quienSoy) {
-  // 0x68 MPU6050 original; 0x70 MPU6500, 0x71 MPU9250, 0x73 MPU9255 y 0x98/0x72 en clones comunes
+  // 0x68 MPU6050 original; 0x70 MPU6500, 0x71 MPU9250, 0x73 MPU9255, 0x74 MPU6515 (el de los GY-521 actuales)
+  // y 0x98/0x72 en clones comunes
   return quienSoy == 0x68 || quienSoy == 0x70 || quienSoy == 0x71 || quienSoy == 0x72 || quienSoy == 0x73 ||
-         quienSoy == 0x98;
+         quienSoy == 0x74 || quienSoy == 0x98;
 }
 
 bool iniciarMpu(TwoWire& bus, uint8_t dir) {
@@ -278,12 +280,18 @@ int ppgLeer(uint32_t* ir, uint32_t* rojo, int max, uint8_t* perdidas) {
 // ============================ Acelerómetro ============================
 bool acelIniciar(TwoWire& bus) {
   busAcel = &bus;
+  diagnosticoAcel[0] = '\0';
   for (uint8_t dir : {(uint8_t)0x68, (uint8_t)0x69}) {  // AD0 a GND (lo normal en el GY-521) o a 3V3
-    if (i2cPresente(bus, dir) && iniciarMpu(bus, dir)) {
+    if (!i2cPresente(bus, dir)) continue;
+    if (iniciarMpu(bus, dir)) {
       modeloAcel = ModeloAcel::Mpu6050;
       dirAcel = dir;
       return true;
     }
+    // Responde en el bus pero no se pudo usar: el WHO_AM_I dice qué chip es (o si falló la configuración)
+    const uint8_t quienSoy = leerRegistro(bus, dir, kWhoAmI);
+    snprintf(diagnosticoAcel, sizeof diagnosticoAcel, "0x%02X responde, WHO_AM_I=0x%02X (%s)", dir, quienSoy,
+             esMpu(quienSoy) ? "fallo al configurarlo" : "chip no reconocido");
   }
   if (iniciarAdxl(bus)) {
     modeloAcel = ModeloAcel::Adxl345;
@@ -306,6 +314,8 @@ int acelLeer(float* ax, float* ay, float* az, int max) {
 }
 
 ModeloAcel acelModelo() { return modeloAcel; }
+
+const char* acelDiagnostico() { return diagnosticoAcel; }
 
 const char* acelNombre() {
   switch (modeloAcel) {

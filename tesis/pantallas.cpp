@@ -313,13 +313,16 @@ void filaConexion(Adafruit_GFX& g, int y, const char* nombre, Conexion c, const 
 }
 
 void pantallaConexion(Adafruit_GFX& g, const VistaPrincipal& v) {
-  if (v.cama[0]) {  // vinculado: a qué paciente hay que conectarlo
-    char titulo[22];
+  char titulo[22];
+  if (v.cama[0])  // vinculado: a qué paciente hay que conectarlo
     snprintf(titulo, sizeof titulo, "%s  %s", v.cama, v.iniciales);
-    textoCentrado(g, 64, kYEtiquetas, titulo);
-  } else {
-    textoCentrado(g, 64, kYEtiquetas, "Conecte al paciente");
-  }
+  else if (v.avisoRed)  // sin servidor no hay vinculación: se dice qué pasa con la red
+    snprintf(titulo, sizeof titulo, "%s", v.red);
+  else if (v.broker != 2)
+    snprintf(titulo, sizeof titulo, "%s", v.wifiBarras < 0 ? "Sin Wi-Fi: buscando" : "Sin servidor");
+  else
+    snprintf(titulo, sizeof titulo, "Conecte al paciente");
+  textoCentrado(g, 64, kYEtiquetas, titulo);
   const bool dedo = v.ppg != EstadoPpg::SinDedo;
   filaConexion(g, 19, "SpO2", !v.sensorPpg ? Conexion::NoInstalado : (dedo ? Conexion::Lista : Conexion::Pendiente),
                "coloque el dedo");
@@ -426,6 +429,37 @@ const char* puntos(uint32_t ms) {
   return kPuntos[(ms / 400) % 4];
 }
 
+// Texto que termina en "..." animado, sin que el resto se corra al cambiar la cantidad de puntos
+void textoConPuntosCentrado(Adafruit_GFX& g, int cx, int y, const char* s, uint32_t ms) {
+  char linea[28];
+  snprintf(linea, sizeof linea, "%s%s", s, puntos(ms));
+  texto(g, cx - (anchoTexto(s) + 18) / 2, y, linea);
+}
+
+// ✓ grande (pantalla Vinculado): dos trazos de 3 px en una caja de 21x17 desde (x, y)
+void checkGrande(Adafruit_GFX& g, int x, int y) {
+  for (int k = 0; k < 3; k++) {
+    g.drawLine(x, y + 8 + k, x + 6, y + 14 + k, kOn);
+    g.drawLine(x + 6, y + 14 + k, x + 20, y + k, kOn);
+  }
+}
+
+// Una fila de la conexión: ✓ listo u ○ pendiente (parpadea), el nombre y el detalle a la derecha
+void filaRed(Adafruit_GFX& g, int y, const char* nombre, bool listo, const char* detalle, uint32_t ms) {
+  if (listo)
+    icono(g, 0, y, kListo);
+  else if ((ms / 400) % 2)
+    icono(g, 1, y + 1, kPendiente);
+  texto(g, 10, y, nombre);
+  textoDerecha(g, 127, y, detalle);
+}
+
+// Pantalla sin QR: barra de estado con la red a la izquierda y el código del sensor a la derecha
+void encabezadoVinculo(Adafruit_GFX& g, const VistaVinculacion& v) {
+  iconosRed(g, 0, v.wifiBarras, v.broker, v.ms);
+  textoDerecha(g, 127, 0, v.codigo);
+}
+
 }  // namespace
 
 void dibujarVinculacion(Adafruit_GFX& g, const VistaVinculacion& v) {
@@ -446,52 +480,159 @@ void dibujarVinculacion(Adafruit_GFX& g, const VistaVinculacion& v) {
       for (int x = 0; x < lado; x++)
         if (moduloQr(cacheQr.qr, x, y)) g.fillRect(ox + 2 * x, oy + 2 * y, 2, 2, kOff);
 
-    // A la derecha: red y código del sensor en el encabezado; debajo, qué hacer y cuánto dura el QR
+    // A la derecha: red y código del sensor en el encabezado; debajo, qué hacer y cuánto le queda al QR
+    // (en texto y en una barra que se vacía a lo largo de los 10 minutos)
     iconosRed(g, 68, v.wifiBarras, v.broker, v.ms);
     char codigo[11];
     snprintf(codigo, sizeof codigo, "%s", v.codigo);
     texto(g, 68, 8, codigo);
-    texto(g, 68, 19, "Escanee");
-    texto(g, 68, 28, "para");
-    texto(g, 68, 37, "vincular");
+    texto(g, 68, 21, "Escanee");
+    texto(g, 68, 31, "con la app");
     char vence[12];
     if (v.segundosRestantes >= 0)
       snprintf(vence, sizeof vence, "vence %d:%02d", v.segundosRestantes / 60 % 100, v.segundosRestantes % 60);
     else
       snprintf(vence, sizeof vence, "vence --:--");
-    texto(g, 68, 52, vence);
+    const bool ultimoMinuto = v.segundosRestantes >= 0 && v.segundosRestantes < 60;
+    if (!ultimoMinuto || (v.ms / 500) % 2) texto(g, 68, 45, vence);  // el último minuto parpadea
+    g.drawRect(68, 55, 60, 6, kOn);
+    if (v.segundosRestantes > 0) {
+      const int s = v.segundosRestantes > kVigenciaQrS ? kVigenciaQrS : v.segundosRestantes;
+      g.fillRect(70, 57, (56 * s + kVigenciaQrS - 1) / kVigenciaQrS, 2, kOn);
+    }
     return;
   }
 
-  // Sin QR que mostrar: a lo ancho, con la red y el código del sensor arriba
-  iconosRed(g, 0, v.wifiBarras, v.broker, v.ms);
-  textoCentrado(g, 64, 8, v.codigo);
+  // Sin QR que mostrar: a lo ancho. Arriba la red y el código del sensor; al medio, en grande, qué pasa;
+  // abajo, el detalle. El título queda entero en la zona azul de las OLED bicolor (desde la fila 16).
+  encabezadoVinculo(g, v);
   char linea[24];
   switch (v.pantalla) {
+    case PantallaVinculo::Vinculado:
+      checkGrande(g, 2, 17);
+      g.setFont(&FreeSansBold9pt7b);
+      g.setTextColor(kOn);
+      g.setCursor(30, 31);
+      g.print("Vinculado");
+      g.setFont(nullptr);
+      snprintf(linea, sizeof linea, "%s  %s", v.cama, v.iniciales);
+      textoCentrado(g, 64, 41, linea);
+      g.drawFastHLine(0, 51, 128, kOn);
+      textoCentrado(g, 64, 55, "Coloque los sensores");
+      return;
+    case PantallaVinculo::Desvinculado:
+      textoGrandeCentrado(g, 64, 31, "Desvinculado");
+      textoCentrado(g, 64, 41, "Sensor liberado");
+      g.drawFastHLine(0, 51, 128, kOn);
+      textoCentrado(g, 64, 55, "Retire los sensores");
+      return;
     case PantallaVinculo::Emparejando:
-      textoGrandeCentrado(g, 64, 34, "Emparejando");
-      textoCentrado(g, 64, 48, "Registrando al");
-      snprintf(linea, sizeof linea, "paciente%s", puntos(v.ms));
-      texto(g, 64 - anchoTexto("paciente...") / 2, 57, linea);
+      // Abajo, cuánto le queda a la app para confirmar (alterna con qué hacer si no alcanza). Al vencer, el
+      // wearable pide un QR nuevo solo.
+      textoGrandeCentrado(g, 64, 31, "Emparejando");
+      textoConPuntosCentrado(g, 64, 41, "Registrando", v.ms);
+      g.drawFastHLine(0, 51, 128, kOn);
+      if (v.segundosRestantes == 0) {
+        textoConPuntosCentrado(g, 64, 55, "Pidiendo QR", v.ms);
+      } else if (v.segundosRestantes > 0 && (v.ms / 2500) % 2 == 0) {
+        snprintf(linea, sizeof linea, "Quedan %d:%02d", v.segundosRestantes / 60 % 100, v.segundosRestantes % 60);
+        textoCentrado(g, 64, 55, linea);
+      } else {
+        textoCentrado(g, 64, 55, "BOOT: QR nuevo");
+      }
       return;
     case PantallaVinculo::Vencido:
-      textoCentrado(g, 64, 22, "Codigo QR vencido");
-      snprintf(linea, sizeof linea, "pidiendo otro%s", puntos(v.ms));
-      texto(g, 64 - anchoTexto("pidiendo otro...") / 2, 34, linea);
-      textoCentrado(g, 64, 52, "BOOT: pedir otro");
+      textoGrandeCentrado(g, 64, 31, "QR vencido");
+      textoConPuntosCentrado(g, 64, 41, "pidiendo otro", v.ms);
+      g.drawFastHLine(0, 51, 128, kOn);
+      textoCentrado(g, 64, 55, "BOOT: pedir otro");
       return;
     default:
-      if (v.broker == 2) {
-        textoCentrado(g, 64, 22, "Pidiendo el QR");
-        textoCentrado(g, 64, 31, "para vincular");
-        texto(g, 64 - anchoTexto("...") / 2, 40, puntos(v.ms));
-        textoCentrado(g, 64, 54, "BOOT: pedir otro");
-      } else {
-        textoCentrado(g, 64, 26, "Sin servidor");
-        snprintf(linea, sizeof linea, "conectando%s", puntos(v.ms));
-        texto(g, 64 - anchoTexto("conectando...") / 2, 38, linea);
-      }
+      break;
   }
+  if (v.broker == 2) {  // conectado: el backend manda el QR enseguida
+    textoGrandeCentrado(g, 64, 31, "Pidiendo QR");
+    textoConPuntosCentrado(g, 64, 41, "al servidor", v.ms);
+    g.drawFastHLine(0, 51, 128, kOn);
+    textoCentrado(g, 64, 55, "BOOT: pedir otro");
+    return;
+  }
+  // Todavía sin servidor: cómo va la conexión, paso a paso (sin ella no hay QR). Abajo, la red a la que se
+  // unió, el aviso de conectividad o, buscando, que el ESP32 solo ve redes de 2,4 GHz.
+  textoGrandeCentrado(g, 64, 31, "Conectando");
+  const bool wifi = v.wifiBarras >= 0;
+  filaRed(g, 37, "Wi-Fi", wifi, wifi ? "OK" : "buscando", v.ms);
+  filaRed(g, 46, "Servidor", false, v.broker == 3 ? "clave?" : (wifi ? "conectando" : "--"), v.ms);
+  char pie[22];
+  snprintf(pie, sizeof pie, "%s", v.avisoRed || wifi ? v.red : "Use una red 2,4 GHz");
+  textoCentrado(g, 64, 56, pie);
+}
+
+void dibujarPasosVinculo(Adafruit_GFX& g, const VistaVinculacion& v) {
+  g.fillScreen(kOff);
+  g.cp437(true);
+  g.setTextWrap(false);
+
+  // Paso actual (0 = QR, 1 = App, 2 = Listo; 3 = los tres completos) y qué hacer ahora
+  int paso = 0;
+  char titulo[22];
+  switch (v.pantalla) {
+    case PantallaVinculo::Qr:
+      snprintf(titulo, sizeof titulo, "Escanee el QR");
+      break;
+    case PantallaVinculo::Vencido:
+      snprintf(titulo, sizeof titulo, "QR vencido");
+      break;
+    case PantallaVinculo::Emparejando:
+      paso = 1;
+      if (v.segundosRestantes > 0)
+        snprintf(titulo, sizeof titulo, "Registrando %d:%02d", v.segundosRestantes / 60 % 100, v.segundosRestantes % 60);
+      else
+        snprintf(titulo, sizeof titulo, "Registrando%s", puntos(v.ms));
+      break;
+    case PantallaVinculo::Vinculado:
+      paso = 3;
+      snprintf(titulo, sizeof titulo, "Listo: %s", v.cama);
+      break;
+    case PantallaVinculo::Desvinculado:
+      snprintf(titulo, sizeof titulo, "Desvinculado");
+      break;
+    default:
+      snprintf(titulo, sizeof titulo, "%s%s",
+               v.broker == 2 ? "Pidiendo QR" : (v.wifiBarras < 0 ? "Buscando Wi-Fi" : "Conectando"), puntos(v.ms));
+  }
+  titulo[17] = '\0';  // deja lugar para "n/3"
+  texto(g, 0, 0, titulo);
+  char cuenta[6];
+  snprintf(cuenta, sizeof cuenta, "%d/3", paso < 3 ? paso + 1 : 3);
+  textoDerecha(g, 127, 0, cuenta);
+
+  // Los tres pasos: círculos unidos por una línea (llena si ya se pasó, punteada si no). Hecho = círculo
+  // lleno con ✓; el actual parpadea; los que faltan, solo el contorno con su número.
+  const int cx[3] = {10, 64, 117}, cy = 18, r = 6;
+  for (int i = 0; i < 2; i++) {
+    if (paso > i)
+      g.drawFastHLine(cx[i] + r + 2, cy, cx[i + 1] - cx[i] - 2 * r - 4, kOn);
+    else
+      for (int x = cx[i] + r + 2; x < cx[i + 1] - r - 1; x += 3) g.drawPixel(x, cy, kOn);
+  }
+  const bool parpadeo = (v.ms / 400) % 2;
+  for (int i = 0; i < 3; i++) {
+    const char numero[2] = {(char)('1' + i), 0};
+    if (i < paso) {
+      g.fillCircle(cx[i], cy, r, kOn);
+      icono(g, cx[i] - 3, cy - 3, kListo, kOff);
+    } else if (i == paso && parpadeo) {
+      g.fillCircle(cx[i], cy, r, kOn);
+      texto(g, cx[i] - 2, cy - 3, numero, kOff);
+    } else {
+      g.drawCircle(cx[i], cy, r, kOn);
+      texto(g, cx[i] - 2, cy - 3, numero);
+    }
+  }
+  texto(g, cx[0] - 5, 25, "QR");
+  textoCentrado(g, cx[1], 25, "App");
+  textoDerecha(g, 127, 25, "Listo");
 }
 
 void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v) {
@@ -520,9 +661,9 @@ void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v) {
     const char* nombre;
     const char* estado;
     int x, y;
-  } items[] = {{"SpO2", v.ppg ? "OK" : "NO", 2, 29},           {"Acel", v.acelerometro ? "OK" : "NO", 68, 29},
-               {"Temp", v.temperatura ? "OK" : "NO", 2, 38},   {"ECG", !v.ecgModulo ? "NO" : (v.electrodos ? "OK" : "--"), 68, 38},
-               {"WiFi", v.wifi ? "OK" : puntos, 2, 47},        {"MQTT", broker, 68, 47}};
+  } items[] = {{"SpO2", v.ppg ? "OK" : "NO", 2, 29},         {"Acel", v.acelerometro ? "OK" : "NO", 68, 29},
+               {"Temp", v.temperatura ? "OK" : "NO", 2, 38}, {"ECG", v.ecgModulo ? "OK" : "NO", 68, 38},
+               {"WiFi", v.wifi ? "OK" : puntos, 2, 47},      {"Serv", broker, 68, 47}};
   for (const auto& it : items) {
     texto(g, it.x, it.y, it.nombre);
     textoDerecha(g, it.x + 57, it.y, it.estado);
@@ -530,9 +671,8 @@ void dibujarArranque(Adafruit_GFX& g, const VistaArranque& v) {
   g.drawFastHLine(0, 55, 128, kOn);
   char pie[22];
   const bool faltaSensor = !v.ppg || !v.acelerometro || !v.temperatura || !v.ecgModulo;
-  if (faltaSensor || !v.electrodos)  // no sigue hasta que esté todo (o se pulse BOOT)
-    snprintf(pie, sizeof pie, "%s",
-             (v.ms / 1500) % 2 ? "BOOT = seguir igual" : (faltaSensor ? "Revise los NO" : "Conecte electrodos"));
+  if (faltaSensor)  // no sigue hasta que respondan los cuatro sensores (o se pulse BOOT)
+    snprintf(pie, sizeof pie, "%s", (v.ms / 1500) % 2 ? "BOOT = seguir igual" : "Revise los NO");
   else if (v.broker == 2)
     snprintf(pie, sizeof pie, "Todo conectado");
   else if (v.red[0])
@@ -565,17 +705,16 @@ void dibujarVerificacion(Adafruit_GFX& g, const VistaArranque& v) {
   g.setTextWrap(false);
 
   // Los seis chequeos de la OLED principal; arriba, el primero que falta
-  const bool listos[] = {v.ppg, v.acelerometro, v.temperatura, v.ecgModulo && v.electrodos, v.wifi, v.broker == 2};
+  const bool listos[] = {v.ppg, v.acelerometro, v.temperatura, v.ecgModulo, v.wifi, v.broker == 2};
   int n = 0;
   for (const bool listo : listos) n += listo;
   const char* paso = !v.ppg            ? "Falta sensor SpO2"
                      : !v.acelerometro ? "Falta acelerometro"
                      : !v.temperatura  ? "Falta sonda temp."
                      : !v.ecgModulo    ? "Falta modulo ECG"
-                     : !v.electrodos   ? "Conecte electrodos"
                      : !v.wifi         ? "Buscando Wi-Fi"
-                     : v.broker == 3   ? "MQTT: clave?"
-                     : v.broker != 2   ? "Conectando MQTT"
+                     : v.broker == 3   ? "Servidor: clave?"
+                     : v.broker != 2   ? "Esperando servidor"
                                        : "Todo listo";
   texto(g, 0, 0, paso);
   char cuenta[6];

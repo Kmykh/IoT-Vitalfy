@@ -42,6 +42,7 @@ struct EstadoRed {
   EstadoVinculo vinculo = EstadoVinculo::Desconocido;
   char qr[72] = "";              // contenido del QR que se muestra
   int64_t qrExpiraMs = 0;        // UTC en ms (0 = sin dato)
+  int64_t emparejandoExpiraMs = 0;  // hasta cuándo puede confirmar la app (UTC en ms; 0 = sin dato)
   char cama[24] = "";
   char iniciales[12] = "";
   char avisoComando[64] = "";    // "Repita: presion" (repetir-medicion)
@@ -51,7 +52,7 @@ struct EstadoRed {
 void redIniciar();                  // crea la tarea de red
 bool redEncolar(const Lectura& l);  // no bloquea; false si la cola está llena
 EstadoRed redEstado();              // copia consistente del estado actual
-void redPedirQr();                  // el botón: pide un QR nuevo (si se está esperando el escaneo)
+void redPedirQr();                  // el botón: pide un QR nuevo (esperando el escaneo o emparejando)
 
 // Las lecturas nuevas se guardan solo vinculado a un paciente o mientras no se sabe (recién encendido)
 inline bool redAceptaLecturas(const EstadoRed& r) {

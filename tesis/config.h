@@ -7,7 +7,7 @@
 // Las claves (redes Wi-Fi y MQTT) van aparte, en secretos.h, que no se versiona.
 #pragma once
 
-#define FIRMWARE_VERSION "2.0.0"
+#define FIRMWARE_VERSION "2.1.0"
 
 // ============================ Dispositivo ============================
 // Código con el que el administrador registró el sensor en Vitalify (POST /api/v1/dispositivos,
