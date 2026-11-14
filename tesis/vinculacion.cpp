@@ -215,6 +215,8 @@ bool interpretarComando(const char* json, size_t largo, Comando* c) {
     if (valorTextoJson(json, largo, "expira", expira, sizeof expira)) c->expiraMs = interpretarIso8601(expira);
     c->accion = AccionComando::MostrarQr;
   } else if (strcmp(accion, "emparejando") == 0) {
+    char expira[32] = "";  // hasta cuándo puede confirmar la app (opcional)
+    if (valorTextoJson(json, largo, "expira", expira, sizeof expira)) c->expiraMs = interpretarIso8601(expira);
     c->accion = AccionComando::Emparejando;
   } else if (strcmp(accion, "vinculado") == 0) {
     char texto[48];
@@ -260,16 +262,20 @@ EfectoComando Vinculacion::aplicar(const Comando& c, uint32_t ms) {
       strncpy(qr_, c.qr, sizeof qr_ - 1);
       qr_[sizeof qr_ - 1] = 0;
       expiraMs_ = c.expiraMs;
+      emparejandoExpiraMs_ = 0;
       cambiar(EstadoVinculo::EsperandoQr, ms, &efecto);
       efecto.cambioEstado = true;  // otro QR: hay que redibujar aunque el estado sea el mismo
       break;
     case AccionComando::Desvinculado:
       qr_[0] = 0;  // el QR nuevo llega enseguida (o se pide)
-      expiraMs_ = 0;
+      expiraMs_ = emparejandoExpiraMs_ = 0;
       cama_[0] = iniciales_[0] = 0;
       cambiar(EstadoVinculo::EsperandoQr, ms, &efecto);
       break;
     case AccionComando::Emparejando:
+      // Otro escaneo del mismo QR trae otro "expira": el plazo vuelve a empezar
+      if (estado_ == EstadoVinculo::Emparejando && c.expiraMs != emparejandoExpiraMs_) desdeMs_ = ms;
+      emparejandoExpiraMs_ = c.expiraMs;
       cambiar(EstadoVinculo::Emparejando, ms, &efecto);
       break;
     case AccionComando::Vinculado:
@@ -278,7 +284,7 @@ EfectoComando Vinculacion::aplicar(const Comando& c, uint32_t ms) {
       strncpy(iniciales_, c.iniciales, sizeof iniciales_ - 1);
       iniciales_[sizeof iniciales_ - 1] = 0;
       qr_[0] = 0;
-      expiraMs_ = 0;
+      expiraMs_ = emparejandoExpiraMs_ = 0;
       cambiar(EstadoVinculo::Vinculado, ms, &efecto);
       break;
     case AccionComando::RepetirMedicion:
@@ -299,12 +305,22 @@ bool Vinculacion::debeSolicitarQr(uint32_t ms, int64_t ahoraEpochMs, bool botonP
     pedir = ms - conectadoMs_ >= kEsperaPrimerComandoMs;  // el broker no tenía nada retenido
   } else if (estado_ == EstadoVinculo::EsperandoQr) {
     pedir = botonPulsado || qrVencido(ahoraEpochMs) || (!qr_[0] && ms - desdeMs_ >= kEsperaPrimerComandoMs);
+  } else if (estado_ == EstadoVinculo::Emparejando) {
+    // Sin "vinculado" a tiempo, la pantalla no puede quedarse en "Emparejando": se pide un QR nuevo. Si la app
+    // todavía puede confirmar, el backend responde "emparejando" otra vez y no se pierde nada.
+    pedir = botonPulsado || emparejamientoVencido(ms, ahoraEpochMs);
   }
   if (pedir) {
     solicitoAlguna_ = true;
     ultimaSolicitudMs_ = ms;
   }
   return pedir;
+}
+
+bool Vinculacion::emparejamientoVencido(uint32_t ms, int64_t ahoraEpochMs) const {
+  if (estado_ != EstadoVinculo::Emparejando) return false;
+  if (ahoraEpochMs > 0 && emparejandoExpiraMs_ > 0) return ahoraEpochMs >= emparejandoExpiraMs_ + kMargenVencimientoMs;
+  return ms - desdeMs_ >= kEsperaEmparejandoMs;
 }
 
 int generarQr(const char* texto, uint8_t qr[kQrTamBuffer]) {

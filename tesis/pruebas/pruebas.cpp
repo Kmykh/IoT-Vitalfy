@@ -719,7 +719,11 @@ static void pruebasVinculacion() {
   char iso[32];
   formatearIso8601(c.expiraMs, iso, sizeof iso);
   VERIFICAR(strcmp(iso, "2026-11-02T15:10:00.000Z") == 0, "expira: %s", iso);
-  VERIFICAR(comando("{\"accion\":\"emparejando\"}", &c) && c.accion == AccionComando::Emparejando, "emparejando");
+  VERIFICAR(comando("{\"accion\":\"emparejando\"}", &c) && c.accion == AccionComando::Emparejando && c.expiraMs == 0,
+            "emparejando");
+  VERIFICAR(comando("{\"accion\":\"emparejando\",\"expira\":\"2026-11-02T15:05:00Z\"}", &c) &&
+                c.accion == AccionComando::Emparejando && c.expiraMs == interpretarIso8601("2026-11-02T15:05:00Z"),
+            "emparejando con expira");
   VERIFICAR(comando("{\"accion\":\"vinculado\",\"cama\":\"MED-B-01\",\"iniciales\":\"R.M.\"}", &c) &&
                 c.accion == AccionComando::Vinculado && strcmp(c.cama, "MED-B-01") == 0 && strcmp(c.iniciales, "R.M.") == 0,
             "vinculado: %s %s", c.cama, c.iniciales);
@@ -766,9 +770,10 @@ static void pruebasVinculacion() {
             "pide otro QR solo cuando vence");
   VERIFICAR(v.debeSolicitarQr(31000, antesDeVencer, true), "el botón no pide otro QR");
   e = v.aplicar(empareja, 32000);
-  VERIFICAR(v.estado() == EstadoVinculo::Emparejando && !v.aceptaLecturas() && !v.debeSolicitarQr(60000, qr.expiraMs, true),
-            "emparejando");
-  e = v.aplicar(vinc, 40000);
+  VERIFICAR(v.estado() == EstadoVinculo::Emparejando && !v.aceptaLecturas() && !v.debeSolicitarQr(40000, qr.expiraMs, false),
+            "emparejando: espera a la app");
+  VERIFICAR(v.debeSolicitarQr(42000, qr.expiraMs, true), "emparejando: el botón pide un QR (el backend decide)");
+  e = v.aplicar(vinc, 43000);
   VERIFICAR(v.estado() == EstadoVinculo::Vinculado && !e.descartarBufer && v.puedePublicar() &&
                 strcmp(v.cama(), "MED-B-01") == 0 && !v.debeSolicitarQr(90000, qr.expiraMs, true),
             "vinculado: publica y no pide QR");
@@ -788,6 +793,43 @@ static void pruebasVinculacion() {
   v.aplicar(repetir, 210000);
   VERIFICAR(strcmp(v.aviso(), "Repita: presion") == 0 && v.avisoMs() == 210000 && v.estado() == EstadoVinculo::EsperandoQr,
             "repetir-medicion: %s", v.aviso());
+
+  // El escaneo vence sin "vinculado": la pantalla vuelve a un QR (antes quedaba en "Emparejando")
+  Vinculacion w;
+  Comando emp5;
+  comando("{\"accion\":\"emparejando\",\"expira\":\"2026-11-02T15:05:00Z\"}", &emp5);
+  const int64_t vence = emp5.expiraMs;
+  w.alConectar(0);
+  w.aplicar(qr, 1000);
+  w.aplicar(emp5, 2000);
+  VERIFICAR(w.emparejandoExpiraMs() == vence && !w.debeSolicitarQr(100000, vence - 1000, false) &&
+                !w.debeSolicitarQr(101000, vence + 2000, false),
+            "pidió un QR antes de que venza el escaneo");
+  VERIFICAR(w.debeSolicitarQr(102000, vence + Vinculacion::kMargenVencimientoMs, false) && w.emparejamientoVencido(102000, vence + 5000),
+            "con expira: a su hora (más el margen) pide un QR nuevo");
+  VERIFICAR(!w.debeSolicitarQr(105000, vence + 8000, false) && w.debeSolicitarQr(112000, vence + 15000, false),
+            "si no llega el QR, lo vuelve a pedir cada 10 s");
+  w.aplicar(qr, 113000);
+  VERIFICAR(w.estado() == EstadoVinculo::EsperandoQr && w.emparejandoExpiraMs() == 0, "el QR nuevo deja de emparejar");
+
+  Vinculacion sinHora;  // sin NTP o un backend que no manda expira: 6 min desde que empezó a emparejar
+  sinHora.alConectar(0);
+  sinHora.aplicar(qr, 1000);
+  sinHora.aplicar(empareja, 10000);
+  VERIFICAR(!sinHora.debeSolicitarQr(10000 + Vinculacion::kEsperaEmparejandoMs - 1, 0, false) &&
+                sinHora.debeSolicitarQr(10000 + Vinculacion::kEsperaEmparejandoMs, 0, false),
+            "sin expira: a los 6 min pide un QR nuevo");
+
+  Vinculacion otraVez;  // la enfermera vuelve a escanear el mismo QR: nuevo plazo
+  Comando emp10;
+  comando("{\"accion\":\"emparejando\",\"expira\":\"2026-11-02T15:10:00Z\"}", &emp10);
+  otraVez.alConectar(0);
+  otraVez.aplicar(qr, 1000);
+  otraVez.aplicar(empareja, 2000);
+  otraVez.aplicar(emp10, 300000);
+  VERIFICAR(otraVez.emparejandoExpiraMs() == emp10.expiraMs && !otraVez.debeSolicitarQr(370000, 0, false) &&
+                otraVez.debeSolicitarQr(300000 + Vinculacion::kEsperaEmparejandoMs, 0, false),
+            "un nuevo escaneo vuelve a contar el plazo");
 
   // QR: versión más chica posible y que entre en la OLED
   uint8_t q[kQrTamBuffer];

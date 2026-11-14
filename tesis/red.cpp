@@ -439,6 +439,7 @@ void atenderComandos(uint32_t ahora) {
   estado.vinculo = vinculo.estado();
   strlcpy(estado.qr, vinculo.qr(), sizeof estado.qr);
   estado.qrExpiraMs = vinculo.expiraMs();
+  estado.emparejandoExpiraMs = vinculo.emparejandoExpiraMs();
   strlcpy(estado.cama, vinculo.cama(), sizeof estado.cama);
   strlcpy(estado.iniciales, vinculo.iniciales(), sizeof estado.iniciales);
   strlcpy(estado.avisoComando, vinculo.aviso(), sizeof estado.avisoComando);
