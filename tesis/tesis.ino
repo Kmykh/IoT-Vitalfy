@@ -1,8 +1,9 @@
 // tesis.ino — Vitalify: wearable IoMT (ESP32 DevKit o ESP32-S3 Zero)
 //
-// Mide FC y SpO2 (MAX30102), ECG (AD8232), temperatura (DS18B20), y caídas y frecuencia respiratoria
-// (MPU6050 sobre el tórax), los muestra en dos OLED (signos en la principal, ECG en la de 128x32) y los
-// envía al backend por MQTT según el contrato de telemetría. Sin vincular a un paciente muestra el QR que
+// Mide FC y SpO2 (MAX30102), ECG (AD8232), temperatura (DS18B20), caídas y frecuencia respiratoria
+// (MPU6050 sobre el tórax) y la carga de su batería (divisor en VP, bateria.h). Los muestra en dos OLED
+// (signos en la principal, ECG en la de 128x32) y los envía al backend por MQTT según el contrato de
+// telemetría. Sin vincular a un paciente muestra el QR que
 // escanea la enfermera y no envía nada. Un LED verde encendido indica que todo funciona.
 //
 //   Núcleo 1: este loop (sensores, algoritmos y pantallas) y la tarea que muestrea el ECG a 250 Hz.
@@ -10,16 +11,19 @@
 //
 // Configuración: config.h (dispositivo, red, pines) y secretos.h (redes Wi-Fi y clave MQTT).
 // Monitor serie a 115200: cada 5 s imprime el estado; la tecla 'p' activa el trazado del ECG
-// para el Serial Plotter.
+// para el Serial Plotter y la 'w', el modo de configuración del Wi-Fi desde la app (como BOOT 3 s).
 
 #include <Adafruit_SSD1306.h>
 #include <Wire.h>
 #include <esp_timer.h>
 #include <time.h>
 
+#include "bateria.h"
 #include "caidas.h"
 #include "config.h"
+#include "config_wifi.h"
 #include "ecg.h"
+#include "fr_cardiaca.h"
 #include "pantallas.h"
 #include "ppg.h"
 #include "red.h"
@@ -57,13 +61,26 @@ ParametrosTemperatura parametrosTemperatura() {
   return p;
 }
 
+ParametrosBateria parametrosBateria() {
+  ParametrosBateria p;
+  p.divisor = BATERIA_DIVISOR;
+  p.correccion = BATERIA_CORRECCION;
+  return p;
+}
+
 ProcesadorPpg ppg(parametrosPpg());
+MedidorBateria bateria(parametrosBateria());
 EvaluadorTemperatura temperatura(parametrosTemperatura());
 SesionPaciente sesion;
 ProcesadorEcg ecg(parametrosEcg());
 DetectorCaidas caidas;
 MonitorRespiracion respiracion;  // FR con el mismo acelerómetro de las caídas
-BarridoEcg barrido(8, 97);  // OLED 128x32: 97 columnas de trazo (~3 s) y el panel de la FC
+// FR desde el pulso (fr_cardiaca.h): el ECG (FM y amplitud de la R) y el PPG (FM, amplitud y línea de base).
+// Se fusiona con la del MPU cada 2 s: frFusionada es la que se muestra y se envía.
+FrCardiaca frEcg(false), frPpg(true);
+int frFusionada = -1;
+FuenteFr fuenteFr = FuenteFr::Ninguna;
+BarridoEcg barrido(8, 128);  // OLED 128x32: el trazo a todo lo ancho (~4 s); la FC va en la principal
 
 constexpr bool kHayBus2 = PIN_I2C2_SDA >= 0;  // segundo bus I2C para la OLED del ECG
 bool oledOk = false, oledEcgOk = false, ppgOk = false, acelOk = false;
@@ -115,10 +132,25 @@ void setup() {
   // periphBegin = false: los buses ya están iniciados con sus pines
   oledOk = i2cPresente(Wire, 0x3C) && oled.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
   oledEcgOk = kHayBus2 && i2cPresente(Wire1, 0x3C) && oledEcg.begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false);
+  // Lo primero que se ve al encender es la presentación con el logo, antes de iniciar los sensores y la red
+  // (hasta el primer display() la OLED muestra lo que quedó en su memoria)
+  VistaArranque inicio;
+  inicio.version = FIRMWARE_VERSION;
+  inicio.codigo = CODIGO_DISPOSITIVO;
+  inicio.ms = millis();
+  if (oledOk) {
+    dibujarArranque(oled, inicio);
+    oled.display();
+  }
+  if (oledEcgOk) {
+    dibujarVerificacion(oledEcg, inicio);
+    oledEcg.display();
+  }
   ppgOk = ppgIniciar(Wire, PPG_CORRIENTE_LED, PPG_RANGO_ADC);
   acelOk = acelIniciar(Wire);
   tempIniciar(PIN_DS18B20);
   tempActualizar(millis());
+  bateriaIniciar(PIN_BATERIA);  // antes del ECG: su tarea también lee la batería
   ecgIniciar(PIN_ECG_SALIDA, PIN_ECG_LO_MAS, PIN_ECG_LO_MENOS);
   redIniciar();  // empieza a conectarse mientras se muestra el chequeo de arranque
 
@@ -143,8 +175,13 @@ void atenderPpg(uint32_t ahora) {
   uint8_t perdidas = 0;
   const int n = ppgLeer(ir, rojo, 32, &perdidas);
   if (perdidas) ppg.saltar(perdidas);
-  for (int i = 0; i < n; i++)
-    if (ppg.procesar(ir[i], rojo[i])) msLatidoPpg = ahora;
+  for (int i = 0; i < n; i++) {
+    if (!ppg.procesar(ir[i], rojo[i])) continue;
+    msLatidoPpg = ahora;
+    const ResultadoPpg& r = ppg.resultado();
+    if (r.estado == EstadoPpg::Valido) frPpg.agregar(r.tLatido, r.acIr, r.dcIr);
+  }
+  if (!ppg.hayDedo() && frPpg.fr() >= 0) frPpg.reiniciar();
   if (n > 0) {
     tDatosPpg = ahora;
   } else if (ahora - tDatosPpg > 2000) {
@@ -182,7 +219,10 @@ void atenderEcg(uint32_t ahora) {
     for (int i = 0; i < n; i++) {
       bool latido = false;
       const float v = ecg.procesar(m[i].adc, m[i].conectados, &latido);
-      if (latido) msLatidoEcg = ahora;
+      if (latido) {
+        msLatidoEcg = ahora;
+        if (!ecg.resultado().ruidosa) frEcg.agregar(ecg.resultado().tR, ecg.resultado().amplitudR);
+      }
       if (m[i].conectados) barrido.agregar(v);
       if (trazarEcg) Serial.printf("ecg:%.0f crudo:%u\n", v, m[i].adc);
     }
@@ -191,11 +231,15 @@ void atenderEcg(uint32_t ahora) {
   const ResultadoEcg& r = ecg.resultado();
   if (r.electrodos != conectadosAntes) {
     conectadosAntes = r.electrodos;
-    if (!r.electrodos) barrido.limpiar();
+    if (!r.electrodos) {
+      barrido.limpiar();
+      frEcg.reiniciar();
+    }
     Serial.printf("ECG: electrodos %s\n", r.electrodos ? "conectados" : "desconectados");
   }
   if (r.ruidosa != ruidosaAntes) {
     ruidosaAntes = r.ruidosa;
+    if (r.ruidosa) frEcg.reiniciar();  // con ruido, los "latidos" no sirven para la FR
     if (r.ruidosa)
       Serial.printf("ECG: senal con ruido (red %.0f RMS, saturada %.0f%%): fije los electrodos y el RL\n", r.ruidoRed,
                     100 * r.saturacion);
@@ -213,6 +257,40 @@ void atenderTemperatura(uint32_t ahora) {
     lecturas = tempLecturas();
     temperatura.agregar(tempCelsius(), ahora);
   }
+}
+
+// Batería: una lectura por segundo (la toma la tarea del ECG). En el monitor serie se avisa cuando cambia el
+// estado; el voltaje va en el estado de cada 5 s, para calibrar BATERIA_CORRECCION con un multímetro.
+void atenderBateria() {
+  static uint32_t lecturas = 0;
+  if (bateriaLecturas() == lecturas) return;
+  lecturas = bateriaLecturas();
+  const EstadoBateria antes = bateria.estado();
+  bateria.agregarMvPin(bateriaMvPin());
+  if (bateria.estado() == antes) return;
+  switch (bateria.estado()) {
+    case EstadoBateria::SinMedicion:
+      Serial.println("Bateria: sin medicion (falta el divisor en VP o esta suelto)");
+      break;
+    case EstadoBateria::Critica:
+      Serial.printf("Bateria critica: %d%% (%.2f V): cargue el wearable\n", bateria.porcentaje(), bateria.voltios());
+      break;
+    case EstadoBateria::Baja:
+      Serial.printf("Bateria baja: %d%% (%.2f V)\n", bateria.porcentaje(), bateria.voltios());
+      break;
+    default:
+      Serial.printf("Bateria: %d%% (%.2f V)\n", bateria.porcentaje(), bateria.voltios());
+  }
+}
+
+// FR: cada 2 s se estima la del pulso (ECG y PPG) y se fusiona con la del MPU (fr_cardiaca.h)
+void atenderFr(uint32_t ahora) {
+  static uint32_t tFr = 0;
+  if (ahora - tFr < 2000) return;
+  tFr = ahora;
+  frEcg.estimar();
+  frPpg.estimar();
+  frFusionada = fusionarFr(respiracion.fr(), frEcg.fr(), frPpg.fr(), &fuenteFr);
 }
 
 // El dedo en el oxímetro inicia la sesión; termina tras 60 s sin ninguna señal del paciente
@@ -255,7 +333,8 @@ void reintentarSensores(uint32_t ahora) {
 // las guarda y las descarta si resulta que no lo estaba).
 void emitirTelemetria(uint32_t ahora) {
   static uint32_t proxima = INTERVALO_TELEMETRIA_MS;
-  if (!sesion.monitoreando() || !redAceptaLecturas(redEstado())) {  // sin paciente no se envía nada
+  // Sin paciente no se envía nada; configurando el Wi-Fi desde la app, la red está en pausa
+  if (!sesion.monitoreando() || !redAceptaLecturas(redEstado()) || configWifiActiva()) {
     caidaPorEnviar = false;
     proxima = ahora + INTERVALO_TELEMETRIA_MS;
     return;
@@ -271,10 +350,11 @@ void emitirTelemetria(uint32_t ahora) {
   const int fc = fcActual(&delEcg);
   if (fc > 0) l.fc = (int16_t)fc;
   if (ppg.resultado().spo2 > 0) l.spo2 = (int16_t)ppg.resultado().spo2;
-  if (respiracion.fr() > 0) l.fr = (int16_t)respiracion.fr();  // solo con el paciente quieto
+  if (frFusionada > 0) l.fr = (int16_t)frFusionada;  // MPU y pulso fusionados (fr_cardiaca.h)
   // Solo una temperatura del cuerpo: con la sonda sobre la piel y ya estable
   if (temperatura.estado() == EstadoTemperatura::Estable) l.tempDecimas = (int16_t)lroundf(temperatura.valor() * 10.0f);
   l.caida = caidaPorEnviar;
+  l.bateria = (int8_t)bateria.porcentaje();  // -1 sin divisor: no se envía
   caidaPorEnviar = false;
   if (!l.tieneDatos()) return;  // sin paciente conectado no hay nada que enviar
   ultimaMedicionUs = l.monoUs;
@@ -290,14 +370,33 @@ int8_t barrasWifi(const EstadoRed& r) {
   return r.rssi >= -85 ? 1 : 0;
 }
 
-VistaEcg vistaEcg(uint32_t ahora) {
+bool horaLocal(const EstadoRed& red, uint8_t* hora, uint8_t* minuto);
+uint8_t estadoBroker(const EstadoRed& red);
+
+VistaEcg vistaEcg(uint32_t ahora, const EstadoRed& red) {
   VistaEcg v;
+  v.wifiBarras = barrasWifi(red);
+  v.broker = estadoBroker(red);
+  v.pendientes = red.pendientes;
+  v.horaValida = horaLocal(red, &v.hora, &v.minuto);
+  v.bateria = (int8_t)bateria.porcentaje();
+  v.estadoBateria = bateria.estado();
   v.electrodos = ecg.resultado().electrodos;
   v.ruido = ecg.resultado().ruidosa;
   v.fc = ecg.resultado().fc;
   v.pulso = ahora - msLatidoEcg < 150;
   v.ms = ahora;
   return v;
+}
+
+// Hora local para la barra de estado (solo con hora NTP)
+bool horaLocal(const EstadoRed& red, uint8_t* hora, uint8_t* minuto) {
+  const time_t t = time(nullptr);
+  struct tm local;
+  if (!red.horaSincronizada || !localtime_r(&t, &local)) return false;
+  *hora = (uint8_t)local.tm_hour;
+  *minuto = (uint8_t)local.tm_min;
+  return true;
 }
 
 // red debe seguir viva mientras se use la vista (v.red apunta a su texto)
@@ -319,13 +418,9 @@ VistaPrincipal vistaPrincipal(uint32_t ahora, const EstadoRed& red) {
       v.broker = 0;
   }
   v.pendientes = red.pendientes;
-  const time_t t = time(nullptr);
-  struct tm local;
-  if (red.horaSincronizada && localtime_r(&t, &local)) {
-    v.horaValida = true;
-    v.hora = (uint8_t)local.tm_hour;
-    v.minuto = (uint8_t)local.tm_min;
-  }
+  v.horaValida = horaLocal(red, &v.hora, &v.minuto);
+  v.bateria = (int8_t)bateria.porcentaje();
+  v.estadoBateria = bateria.estado();
   v.sensorPpg = ppgOk;
   v.ppg = p.estado;
   v.progreso = p.progreso;
@@ -341,8 +436,9 @@ VistaPrincipal vistaPrincipal(uint32_t ahora, const EstadoRed& red) {
   v.acelerometro = acelOk;
   v.movimiento = caidas.actividad() == Actividad::Movimiento;
   v.alertaCaida = msCaida != 0 && ahora - msCaida < 30000;
-  v.fr = respiracion.fr();
+  v.fr = frFusionada;
   v.estadoFr = respiracion.estado();
+  v.fuenteFr = fuenteFr;
   v.cama = red.cama;
   v.iniciales = red.iniciales;
   v.aviso = red.avisoComandoMs && ahora - red.avisoComandoMs < 15000 ? red.avisoComando : "";
@@ -409,6 +505,9 @@ VistaVinculacion vistaVinculacion(uint32_t ahora, const EstadoRed& red) {
   v.red = v.avisoRed ? red.aviso : red.ssid;
   v.cama = red.cama;
   v.iniciales = red.iniciales;
+  v.bateria = (int8_t)bateria.porcentaje();
+  v.estadoBateria = bateria.estado();
+  v.horaValida = horaLocal(red, &v.hora, &v.minuto);
   v.ms = ahora;
   v.qr = red.qr;
   const int64_t ahoraMs = red.horaSincronizada ? (int64_t)time(nullptr) * 1000 : 0;
@@ -430,6 +529,14 @@ VistaVinculacion vistaVinculacion(uint32_t ahora, const EstadoRed& red) {
     v.pantalla = PantallaVinculo::Vencido;
   else
     v.pantalla = PantallaVinculo::Qr;
+  // Desde cuándo está esta pantalla (para su animación de entrada: el QR se arma, los mensajes entran)
+  static PantallaVinculo anterior = PantallaVinculo::Solicitando;
+  static uint32_t desde = 0;
+  if (v.pantalla != anterior) {
+    anterior = v.pantalla;
+    desde = ahora;
+  }
+  v.msPantalla = ahora - desde;
   return v;
 }
 
@@ -491,7 +598,11 @@ VistaArranque vistaArranque(uint32_t ahora, const EstadoRed& red) {
     default:
       a.broker = red.broker == EstadoBroker::Conectando ? 1 : 0;
   }
+  a.wifiBarras = barrasWifi(red);
+  a.avisoRed = red.aviso[0] != 0;
   a.red = red.aviso[0] ? red.aviso : (a.wifi ? red.ssid : "");
+  a.bateria = (int8_t)bateria.porcentaje();
+  a.estadoBateria = bateria.estado();
   a.ms = ahora;
   return a;
 }
@@ -499,8 +610,37 @@ VistaArranque vistaArranque(uint32_t ahora, const EstadoRed& red) {
 // Cada OLED tiene lo suyo. Durante el arranque, la principal muestra la lista de chequeos y la de
 // 128x32, la verificación animada. Mientras se vincula, la principal muestra el QR (o la conexión) y la
 // de 128x32, los tres pasos. Vinculado, la principal muestra los signos y la de 128x32, el ECG.
+// Configurando el Wi-Fi desde la app (config_wifi.h). c debe seguir viva mientras se use la vista.
+VistaConfigWifi vistaConfigWifi(uint32_t ahora, const EstadoConfigWifi& c) {
+  VistaConfigWifi v;
+  v.etapa = c.etapa;
+  v.fallo = c.fallo;
+  v.qr = c.qr;
+  v.pop = c.pop;
+  v.codigo = CODIGO_DISPOSITIVO;
+  v.ssid = c.ssid;
+  v.bateria = (int8_t)bateria.porcentaje();
+  v.estadoBateria = bateria.estado();
+  v.ms = ahora;
+  return v;
+}
+
 void actualizarPantallas(uint32_t ahora) {
   static uint32_t tPrincipal = 0, tEcg = 0;
+  if (configWifiActiva()) {  // el modo de configuración del Wi-Fi ocupa las dos OLED
+    const EstadoConfigWifi c = configWifiEstado();
+    if (oledEcgOk && ahora - tEcg >= 40) {
+      tEcg = ahora;
+      dibujarPasosConfigWifi(oledEcg, vistaConfigWifi(ahora, c));
+      oledEcg.display();
+    }
+    if (oledOk && ahora - tPrincipal >= 40) {
+      tPrincipal = ahora;
+      dibujarConfigWifi(oled, vistaConfigWifi(ahora, c));
+      oled.display();
+    }
+    return;
+  }
   const EstadoRed red = redEstado();
   const bool arranque = enArranque(ahora, red);  // en cada vuelta, para no perder un toque de BOOT
   seguirVinculo(ahora, red);
@@ -513,11 +653,13 @@ void actualizarPantallas(uint32_t ahora) {
     else if (vinculando)
       dibujarPasosVinculo(oledEcg, vistaVinculacion(ahora, red));
     else
-      dibujarEcg(oledEcg, barrido, vistaEcg(ahora));
+      dibujarEcg(oledEcg, barrido, vistaEcg(ahora, red));
     oledEcg.display();
   }
 
-  if (!oledOk || ahora - tPrincipal < 200) return;  // 5 cuadros/s bastan para números
+  // Animaciones (arranque y vinculación) a 25 cuadros/s; los signos, a 5 (bastan para números y el bus I2C
+  // queda libre para el oxímetro y el acelerómetro)
+  if (!oledOk || ahora - tPrincipal < ((arranque || vinculando) ? 40u : 200u)) return;
   tPrincipal = ahora;
   if (arranque)
     dibujarArranque(oled, vistaArranque(ahora, red));
@@ -528,21 +670,52 @@ void actualizarPantallas(uint32_t ahora) {
   oled.display();
 }
 
-// Botón BOOT, terminado el arranque: mientras se espera el escaneo (o se empareja), pide un QR nuevo al
-// backend. Si la app todavía puede confirmar, el backend responde "emparejando" y no se pierde nada.
+// Botón BOOT, terminado el arranque (un toque durante el arranque es "seguir igual" y no cuenta):
+//   · apretado 3 s: modo de configuración del Wi-Fi desde la app (config_wifi.h);
+//   · un toque (al soltarlo, menos de 1 s): en ese modo, salir; si no, mientras se espera el escaneo (o se
+//     empareja), pide un QR nuevo al backend. Si la app todavía puede confirmar, el backend responde
+//     "emparejando" y no se pierde nada.
 void atenderBoton(uint32_t ahora) {
-  static bool antes = false;
-  static uint32_t tCambio = 0;
+  static bool antes = false, largo = false, ignorar = false;
+  static uint32_t tCambio = 0, tApretado = 0;
   const bool pulsado = digitalRead(PIN_BOTON) == LOW;
+  if (pulsado && antes && !ignorar && !largo && !configWifiActiva() && ahora - tApretado >= 3000) {
+    largo = true;
+    configWifiIniciar(ahora, "BOOT 3 s");
+  }
   if (pulsado == antes || ahora - tCambio < 50) return;  // antirrebote de 50 ms
   antes = pulsado;
   tCambio = ahora;
-  if (!pulsado || !arranqueTerminado) return;
+  if (pulsado) {
+    tApretado = ahora;
+    largo = false;
+    ignorar = !arranqueTerminado;
+    return;
+  }
+  if (ignorar || largo || ahora - tApretado >= 1000) return;
+  if (configWifiActiva()) {
+    configWifiSalir();
+    return;
+  }
   const EstadoVinculo vinculo = redEstado().vinculo;
   if (vinculo == EstadoVinculo::EsperandoQr || vinculo == EstadoVinculo::Emparejando) {
     redPedirQr();
     Serial.println("Boton: se pide un QR nuevo");
   }
+}
+
+// Sin ninguna red conocida en 1 min desde el encendido, entra solo al modo de configuración del Wi-Fi (así,
+// en una red nueva, basta con abrir la app). No con un paciente: ahí se sigue buscando la red de siempre.
+const uint32_t kMsSinRedParaConfigurar = 60000;
+void atenderConfigWifiAutomatica(uint32_t ahora) {
+  static bool vioWifi = false, hecho = false;
+  if (hecho || configWifiActiva()) return;
+  const EstadoRed red = redEstado();
+  if (red.wifi == EstadoWifi::Conectado) vioWifi = true;
+  if (vioWifi || !arranqueTerminado || ahora < kMsSinRedParaConfigurar) return;
+  if (sesion.monitoreando() || red.vinculo == EstadoVinculo::Vinculado) return;
+  hecho = true;
+  configWifiIniciar(ahora, "ninguna red conocida en 1 min");
 }
 
 // LED verde: encendido = todo funciona. Responden los cuatro sensores y las dos OLED, hay Wi-Fi y hora
@@ -590,6 +763,8 @@ void atenderSerial(uint32_t ahora) {
     if (c == 'p' || c == 'P') {
       trazarEcg = !trazarEcg;
       if (!trazarEcg) Serial.println("Trazado del ECG apagado");
+    } else if ((c == 'w' || c == 'W') && arranqueTerminado) {
+      configWifiIniciar(ahora, "tecla w del monitor serie");  // como BOOT 3 s
     }
   }
   static uint32_t tLog = 0;
@@ -615,13 +790,17 @@ void atenderSerial(uint32_t ahora) {
       snprintf(temp, sizeof temp, "%.1f C %s%s", temperatura.valor(), EvaluadorTemperatura::nombre(temperatura.rango()),
                temperatura.predicha() ? " (predicha)" : "");
   }
-  char fr[24];
-  if (respiracion.fr() > 0)
-    snprintf(fr, sizeof fr, "FR %d", respiracion.fr());
+  char fr[64];
+  const char* mpu = respiracion.fr() > 0                                  ? ""
+                    : respiracion.estado() == EstadoRespiracion::Movimiento ? " en movimiento"
+                    : respiracion.estado() == EstadoRespiracion::SinSenal   ? " sin senal"
+                                                                            : " midiendo";
+  snprintf(fr, sizeof fr, "FR %d [MPU %d%s, ECG %d, PPG %d]", frFusionada, respiracion.fr(), mpu, frEcg.fr(), frPpg.fr());
+  char bat[40];
+  if (bateria.porcentaje() >= 0)
+    snprintf(bat, sizeof bat, "Bateria %d%% %.2f V (pin %d mV)", bateria.porcentaje(), bateria.voltios(), bateriaMvPin());
   else
-    snprintf(fr, sizeof fr, "FR %s", respiracion.estado() == EstadoRespiracion::Movimiento ? "en movimiento"
-                                     : respiracion.estado() == EstadoRespiracion::SinSenal ? "sin senal"
-                                                                                            : "midiendo");
+    snprintf(bat, sizeof bat, "Bateria -- (pin %d mV)", bateriaMvPin());
   const char* vinculo = red.vinculo == EstadoVinculo::Vinculado     ? "vinculado"
                         : red.vinculo == EstadoVinculo::EsperandoQr ? "esperando QR"
                         : red.vinculo == EstadoVinculo::Emparejando ? "emparejando"
@@ -631,7 +810,7 @@ void atenderSerial(uint32_t ahora) {
                      : red.broker == EstadoBroker::Conectando ? "conectando"
                                                               : "--";
   Serial.printf("%s (%s) | FC %d (%s) | SpO2 %d | %s | dedo %s IR %lu PI %.2f%% | T %s | %s | ECG %s | Wi-Fi %s %d dBm | "
-                "MQTT %s | pendientes %u, enviadas %lu\n",
+                "MQTT %s | pendientes %u, enviadas %lu | %s\n",
                 sesion.monitoreando() ? "MONITOREO" : "ESPERA", vinculo, fc, delEcg ? "ECG" : "PPG", p.spo2, fr,
                 ppg.hayDedo() ? "SI" : "NO", (unsigned long)ppg.ultimoIr(), p.perfusion, temp, caidas.actividad() == Actividad::Movimiento ? "movimiento" : "reposo",
                 !ecgModuloPresente()          ? "sin modulo AD8232"
@@ -639,7 +818,7 @@ void atenderSerial(uint32_t ahora) {
                 : ecg.resultado().ruidosa     ? "con ruido"
                                               : "conectado",
                 red.wifi == EstadoWifi::Conectado ? red.ssid : "buscando", red.rssi, mqtt, red.pendientes,
-                (unsigned long)red.enviadas);
+                (unsigned long)red.enviadas, bat);
 }
 
 void loop() {
@@ -648,9 +827,13 @@ void loop() {
   atenderAcelerometro(ahora);
   atenderEcg(ahora);
   atenderTemperatura(ahora);
+  atenderBateria();
+  atenderFr(ahora);
   atenderSesion(ahora);
   reintentarSensores(ahora);
   emitirTelemetria(ahora);
+  configWifiAtender(ahora);
+  atenderConfigWifiAutomatica(ahora);
   actualizarPantallas(ahora);
   atenderBoton(ahora);
   atenderLed(ahora);

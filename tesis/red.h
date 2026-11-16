@@ -4,7 +4,8 @@
 // esperan a la red. El loop solo entrega lecturas a una cola y consulta el estado.
 //
 //   · Wi-Fi: escanea, se une a la red conocida con mejor señal y, si se cae, vuelve a buscar
-//     (espera creciente de 2 a 30 s entre intentos).
+//     (espera creciente de 2 a 30 s entre intentos). Conocidas: las configuradas desde la app por
+//     Bluetooth (config_wifi.h, en la flash) y las de secretos.h.
 //   · Hora: NTP. Cada lectura guarda el instante en que se midió; si se midió sin hora, se le
 //     asigna al sincronizar (el backend exige "ts" real y deduplica por dispositivo + ts).
 //   · MQTT: cliente nativo de ESP-IDF (esp-mqtt) con QoS 1, reconexión automática y "last will"
@@ -53,6 +54,8 @@ void redIniciar();                  // crea la tarea de red
 bool redEncolar(const Lectura& l);  // no bloquea; false si la cola está llena
 EstadoRed redEstado();              // copia consistente del estado actual
 void redPedirQr();                  // el botón: pide un QR nuevo (esperando el escaneo o emparejando)
+void redPausar();                   // la configuración por la app (config_wifi.h) toma el Wi-Fi
+bool redPausada();                  // la tarea de red ya soltó el Wi-Fi y el MQTT
 
 // Las lecturas nuevas se guardan solo vinculado a un paciente o mientras no se sabe (recién encendido)
 inline bool redAceptaLecturas(const EstadoRed& r) {

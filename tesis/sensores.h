@@ -1,4 +1,4 @@
-// sensores.h — Acceso al hardware: MAX30102, MPU6050 (o ADXL345), DS18B20 y AD8232.
+// sensores.h — Acceso al hardware: MAX30102, MPU6050 (o ADXL345), DS18B20, AD8232 y el divisor de la batería.
 // Los algoritmos están aparte (ppg, ecg, caidas); aquí solo se leen los datos crudos.
 #pragma once
 
@@ -56,3 +56,9 @@ void ecgIniciar(uint8_t pinSalida, uint8_t pinLoMas, uint8_t pinLoMenos);
 int ecgLeer(MuestraEcg* destino, int max);
 // true si el módulo AD8232 está conectado al ESP32 (aunque no haya electrodos en el paciente)
 bool ecgModuloPresente();
+
+// ---------- Batería (divisor de 100 kΩ + 100 kΩ en VP / GPIO 36; ver bateria.h) ----------
+// La lee la tarea del ECG una vez por segundo (promedio de 8 muestras), para no cruzarse con ella en el ADC1.
+void bateriaIniciar(int8_t pin);  // antes de ecgIniciar; -1 = sin divisor
+int bateriaMvPin();               // mV en el pin; -1 = todavía sin lectura
+uint32_t bateriaLecturas();       // cambia con cada lectura nueva

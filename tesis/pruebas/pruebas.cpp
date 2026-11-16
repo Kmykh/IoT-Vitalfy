@@ -6,7 +6,10 @@
 
 #include <initializer_list>
 
+#include "bateria.h"
 #include "caidas.h"
+#include "redes.h"
+#include "fr_cardiaca.h"
 #include "ecg.h"
 #include "ppg.h"
 #include "respiracion.h"
@@ -406,6 +409,15 @@ static void pruebasTelemetria() {
                             "{\"dispositivo\":\"ESP32-001\",\"ts\":\"2026-09-30T14:05:10.250Z\",\"seq\":18234,"
                             "\"fc\":82,\"fr\":16,\"spo2\":97,\"temp\":36.8,\"caida\":false}") == 0,
             "JSON completo: %s", buf);
+  l.bateria = 87;  // con el divisor de la batería conectado (bateria.h)
+  construirJsonTelemetria("ESP32-001", l, buf, sizeof buf);
+  VERIFICAR(strcmp(buf, "{\"dispositivo\":\"ESP32-001\",\"ts\":\"2026-09-30T14:05:10.250Z\",\"seq\":18234,"
+                        "\"fc\":82,\"fr\":16,\"spo2\":97,\"temp\":36.8,\"caida\":false,\"bateria\":87}") == 0,
+            "JSON con batería: %s", buf);
+  l.bateria = -1;
+  Lectura soloBateria;  // la batería sola no es una lectura: sin paciente no se envía nada
+  soloBateria.bateria = 50;
+  VERIFICAR(!soloBateria.tieneDatos(), "la batería sola cuenta como lectura");
   Lectura soloFr;  // paciente quieto sin dedo: la FR sola ya es una lectura
   soloFr.fr = 18;
   VERIFICAR(soloFr.tieneDatos(), "una lectura con solo FR no tiene datos");
@@ -841,6 +853,209 @@ static void pruebasVinculacion() {
   printf("  QR: %d módulos (%d px) con un código de 9; %d (%d px) con uno de 32\n", lado, 2 * lado, largo, 2 * largo);
 }
 
+static void pruebasBateria() {
+  printf("Batería (LiPo de 1 celda por el divisor en VP)\n");
+  // Curva de descarga: extremos, puntos de la tabla e interpolación
+  VERIFICAR(MedidorBateria::porcentajeDe(4.25f) == 100 && MedidorBateria::porcentajeDe(4.20f) == 100, "llena");
+  VERIFICAR(MedidorBateria::porcentajeDe(3.84f) == 50, "3,84 V = 50 %%: %d", MedidorBateria::porcentajeDe(3.84f));
+  VERIFICAR(MedidorBateria::porcentajeDe(3.73f) == 20, "3,73 V = 20 %%");
+  VERIFICAR(MedidorBateria::porcentajeDe(3.10f) == 0, "vacía");
+  const int medio = MedidorBateria::porcentajeDe(4.05f);
+  VERIFICAR(medio > 80 && medio < 85, "interpola entre 4,02 y 4,08 V: %d", medio);
+  int anterior = 101;
+  bool monotona = true;
+  for (float v = 4.2f; v >= 3.2f; v -= 0.01f) {
+    const int p = MedidorBateria::porcentajeDe(v);
+    monotona = monotona && p <= anterior;
+    anterior = p;
+  }
+  VERIFICAR(monotona, "la curva nunca sube al bajar el voltaje");
+
+  // Divisor 100k/100k: 1960 mV en el pin = 3,92 V
+  MedidorBateria m;
+  VERIFICAR(m.porcentaje() == -1 && m.estado() == EstadoBateria::SinMedicion, "empieza sin medición");
+  VERIFICAR(m.agregarMvPin(1960), "la primera lectura cambia el porcentaje");
+  VERIFICAR(fabsf(m.voltios() - 3.92f) < 0.001f && m.porcentaje() == MedidorBateria::porcentajeDe(3.92f) &&
+                m.estado() == EstadoBateria::Normal,
+            "3,92 V: %.2f V, %d %%", m.voltios(), m.porcentaje());
+
+  // El pico de la radio Wi-Fi (una lectura 60 mV más baja) no mueve el porcentaje mostrado
+  const int antes = m.porcentaje();
+  m.agregarMvPin(1930);
+  VERIFICAR(m.porcentaje() == antes, "una lectura suelta movió el porcentaje: %d -> %d", antes, m.porcentaje());
+  for (int i = 0; i < 3; i++) m.agregarMvPin(1960);
+  VERIFICAR(m.porcentaje() == antes, "el porcentaje oscila cerca del mismo voltaje");
+
+  // Descarga lenta hasta crítica
+  for (int i = 0; i < 200; i++) m.agregarMvPin(1840);  // 3,68 V
+  VERIFICAR(m.estado() == EstadoBateria::Critica && m.porcentaje() <= 10, "3,68 V es crítica: %d %%", m.porcentaje());
+  for (int i = 0; i < 200; i++) m.agregarMvPin(1862);  // 3,724 V
+  VERIFICAR(m.estado() == EstadoBateria::Baja, "3,72 V es baja: %d %%", m.porcentaje());
+
+  // Sin divisor: el pin al aire lee cerca de 0. Una lectura mala se ignora; tres seguidas, "sin medición"
+  m.agregarMvPin(40);
+  VERIFICAR(m.estado() == EstadoBateria::Baja, "una lectura en 0 borró la medición");
+  m.agregarMvPin(30);
+  m.agregarMvPin(0);
+  VERIFICAR(m.estado() == EstadoBateria::SinMedicion && m.porcentaje() == -1, "sin divisor no inventa un porcentaje");
+  MedidorBateria sinDivisor;
+  for (int i = 0; i < 10; i++) sinDivisor.agregarMvPin(i * 37 % 500);
+  VERIFICAR(sinDivisor.porcentaje() == -1, "pin al aire: %d %%", sinDivisor.porcentaje());
+  VERIFICAR(!sinDivisor.agregarMvPin(-1) && sinDivisor.estado() == EstadoBateria::SinMedicion, "sin lectura todavía");
+
+  // Carga: al conectar el cargador el voltaje sube y el porcentaje lo sigue
+  MedidorBateria carga;
+  carga.agregarMvPin(1880);
+  const int alConectar = carga.porcentaje();
+  for (int i = 0; i < 100; i++) carga.agregarMvPin(2080);  // 4,16 V
+  VERIFICAR(carga.porcentaje() > alConectar + 30, "cargando: %d -> %d %%", alConectar, carga.porcentaje());
+
+  // Corrección contra un multímetro
+  ParametrosBateria p;
+  p.correccion = 1.02f;
+  MedidorBateria corregido(p);
+  corregido.agregarMvPin(1960);
+  VERIFICAR(fabsf(corregido.voltios() - 3.92f * 1.02f) < 0.001f, "corrección: %.3f V", corregido.voltios());
+}
+
+static uint32_t semillaAzar = 12345;
+static uint32_t azarDePrueba() {  // generador lineal: determinista en las pruebas
+  semillaAzar = semillaAzar * 1103515245u + 12345u;
+  return semillaAzar >> 8;
+}
+
+// Latidos sintéticos: FC base con arritmia sinusal respiratoria (RR ±5 %), amplitud ±10 % y línea de base
+// ±2 % al ritmo de la FR, más ruido gaussiano. Estima cada 2 s, como el firmware.
+static float normalDePrueba() {
+  const float u1 = ((azarDePrueba() & 0xFFFF) + 1) / 65537.0f, u2 = (azarDePrueba() & 0xFFFF) / 65536.0f;
+  return sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
+}
+static int simularLatidos(FrCardiaca& f, float fc, float fr, float segundos, float ruido, bool modular,
+                          int perderLatidoCada = 0) {
+  float t = 0, proxima = 2;
+  int k = 0;
+  while (t < segundos) {
+    const float resp = modular ? sinf(6.2831853f * fr / 60.0f * t) : 0;
+    t += 60.0f / fc * (1 - 0.05f * resp + ruido * normalDePrueba());
+    k++;
+    if (perderLatidoCada && k % perderLatidoCada == 0) continue;  // el detector se lo saltó
+    const float amp = 1 + 0.1f * sinf(6.2831853f * fr / 60.0f * t + 0.6f) * (modular ? 1 : 0) + ruido * normalDePrueba();
+    const float base = 1000 * (1 + 0.02f * resp) + 1000 * ruido * normalDePrueba();
+    f.agregar(t, amp, base);
+    if (t >= proxima) {
+      f.estimar();
+      proxima += 2;
+    }
+  }
+  return f.fr();
+}
+
+static void pruebasFrCardiaca() {
+  printf("FR desde el pulso (FM, AM y línea de base) y fusión con el MPU6050\n");
+  const float casos[][2] = {{75, 12}, {75, 16}, {80, 20}, {60, 8}, {90, 24}};
+  for (const auto& c : casos) {
+    FrCardiaca ppg(true);
+    const int fr = simularLatidos(ppg, c[0], c[1], 60, 0.01f, true);
+    VERIFICAR(fr > 0 && fabsf((float)fr - c[1]) <= 1.5f && ppg.modulaciones() >= 2,
+              "PPG: FC %.0f, FR %.0f -> %d rpm (%d huellas; FM %.1f AM %.1f base %.1f)", c[0], c[1], fr,
+              ppg.modulaciones(), ppg.ultimaFm(), ppg.ultimaAm(), ppg.ultimaBase());
+    FrCardiaca ecg(false);
+    const int frEcg = simularLatidos(ecg, c[0], c[1], 60, 0.01f, true);
+    VERIFICAR(frEcg > 0 && fabsf((float)frEcg - c[1]) <= 1.5f, "ECG (FM y AM): FC %.0f, FR %.0f -> %d rpm", c[0], c[1],
+              frEcg);
+  }
+
+  FrCardiaca perdidos(true);
+  const int frPerdidos = simularLatidos(perdidos, 75, 15, 60, 0.01f, true, 23);
+  VERIFICAR(frPerdidos > 0 && abs(frPerdidos - 15) <= 2, "con un latido perdido cada 23: %d rpm", frPerdidos);
+
+  int falsos = 0;
+  for (int s = 0; s < 8; s++) {
+    FrCardiaca ruido(true);
+    if (simularLatidos(ruido, 72, 15, 60, 0.02f, false) > 0) falsos++;
+  }
+  VERIFICAR(falsos == 0, "sin respiración en el pulso no debe inventar una FR: %d de 8", falsos);
+
+  FrCardiaca nyquist(true);
+  VERIFICAR(simularLatidos(nyquist, 50, 26, 60, 0.01f, true) < 0, "FC 50 y FR 26: pocos latidos por respiración");
+
+  FrCardiaca corto(true);
+  VERIFICAR(simularLatidos(corto, 75, 15, 15, 0.01f, true) < 0, "con 15 s de latidos todavía no hay FR");
+
+  FrCardiaca pausa(true);
+  simularLatidos(pausa, 75, 15, 60, 0.01f, true);
+  pausa.agregar(70, 1, 1000);  // 10 s sin latidos (se sacó el dedo): empieza de nuevo
+  VERIFICAR(pausa.fr() < 0, "tras una pausa de latidos vuelve a medir desde cero");
+
+  FuenteFr f;
+  VERIFICAR(fusionarFr(16, 15, -1, &f) == 16 && f == FuenteFr::MpuYPulso, "MPU 16 y ECG 15 coinciden: 16");
+  VERIFICAR(fusionarFr(12, 15, -1, &f) == 13 && f == FuenteFr::MpuYPulso, "MPU 12 y ECG 15: (2×12+15)/3 = 13");
+  VERIFICAR(fusionarFr(14, 24, -1, &f) == 14 && f == FuenteFr::Mpu, "si no coinciden manda el MPU");
+  VERIFICAR(fusionarFr(-1, 18, 17, &f) == 18 && f == FuenteFr::Ecg, "sin MPU: ECG y PPG coinciden -> promedio");
+  VERIFICAR(fusionarFr(-1, -1, 17, &f) == 17 && f == FuenteFr::Ppg, "solo el PPG");
+  VERIFICAR(fusionarFr(-1, 22, 14, &f) == 22 && f == FuenteFr::Ecg, "ECG y PPG no coinciden: el ECG");
+  VERIFICAR(fusionarFr(-1, -1, -1, &f) == -1 && f == FuenteFr::Ninguna, "sin ninguna");
+}
+
+static void pruebasRedes() {
+  printf("Redes configuradas desde la app y modo Wi-Fi por Bluetooth\n");
+  ListaRedes l;
+  VERIFICAR(l.agregar("Casa", "clave-casa-123") && l.cantidad() == 1, "agrega una red");
+  VERIFICAR(l.agregar("Hospital", "") && l.cantidad() == 2 && strcmp(l.red(0).ssid, "Hospital") == 0,
+            "la más reciente queda primero (y una red abierta va sin clave)");
+  VERIFICAR(!l.agregar("", "clave1234") && !l.agregar("Corta", "1234567") &&
+                !l.agregar("SSID-de-mas-de-treinta-y-dos-bytes!", "clave1234"),
+            "rechaza nombres vacíos o largos y claves de 1 a 7 caracteres");
+  VERIFICAR(l.agregar("casa", "clave-nueva-456") && l.cantidad() == 2 && strcmp(l.red(0).ssid, "casa") == 0 &&
+                strcmp(l.red(0).clave, "clave-nueva-456") == 0 && strcmp(l.red(1).ssid, "Hospital") == 0,
+            "la misma red (sin distinguir mayúsculas) se actualiza y sube, sin duplicarse");
+  for (int i = 0; i < 6; i++) {
+    char ssid[16];
+    snprintf(ssid, sizeof ssid, "Red%d", i);
+    l.agregar(ssid, "clave1234");
+  }
+  VERIFICAR(l.cantidad() == ListaRedes::kMax && strcmp(l.red(0).ssid, "Red5") == 0 &&
+                strcmp(l.red(ListaRedes::kMax - 1).ssid, "Red1") == 0,
+            "con 5 guardadas sale la más antigua: %s ... %s", l.red(0).ssid, l.red(ListaRedes::kMax - 1).ssid);
+  VERIFICAR(l.quitar("red3") && l.cantidad() == 4 && !l.quitar("No-esta"), "quitar");
+
+  // NVS: ida y vuelta, y datos corruptos
+  uint8_t buf[ListaRedes::kTamSerializado];
+  const size_t n = l.serializar(buf, sizeof buf);
+  ListaRedes copia;
+  VERIFICAR(n > 0 && copia.deserializar(buf, n) && copia.cantidad() == 4 && strcmp(copia.red(0).ssid, "Red5") == 0 &&
+                strcmp(copia.red(0).clave, "clave1234") == 0,
+            "serializa y vuelve a leer");
+  buf[0] = 99;
+  VERIFICAR(!copia.deserializar(buf, n) && copia.cantidad() == 0, "versión desconocida: queda vacía");
+  VERIFICAR(!copia.deserializar(buf, 1) && !copia.deserializar(nullptr, 0), "largo inválido");
+  VERIFICAR(l.serializar(buf, 10) == 0, "no detectó búfer chico");
+
+  // Código de un solo uso, QR y nombre Bluetooth
+  char pop[kLargoPop + 1], otro[kLargoPop + 1];
+  generarPop(pop, azarDePrueba);
+  generarPop(otro, azarDePrueba);
+  bool alfabeto = strlen(pop) == (size_t)kLargoPop;
+  for (const char* c = pop; *c; c++) alfabeto &= strchr(kAlfabetoPop, *c) != nullptr && !strchr("01OIL", *c);
+  VERIFICAR(alfabeto && strcmp(pop, otro) != 0, "código de 8 sin 0/O/1/I/L y distinto cada vez: %s %s", pop, otro);
+  char qr[48], codigo[33], popLeido[kLargoPop + 1];
+  VERIFICAR(textoQrWifi("ESP32-001", pop, qr, sizeof qr) > 0 && strncmp(qr, "VTFW:ESP32-001:", 15) == 0, "QR: %s", qr);
+  VERIFICAR(leerQrWifi(qr, codigo, popLeido) && strcmp(codigo, "ESP32-001") == 0 && strcmp(popLeido, pop) == 0,
+            "lee el QR de configuración");
+  VERIFICAR(!leerQrWifi("VTF1:ESP32-001:K7P3QX9M", codigo, popLeido) && !leerQrWifi("VTFW:ESP32-001:abc", codigo, popLeido) &&
+                !leerQrWifi("VTFW::K7P3QX9M", codigo, popLeido),
+            "no confunde el QR de vinculación ni acepta uno incompleto");
+  uint8_t q[kQrTamBuffer];
+  const int lado = generarQr(qr, q);
+  VERIFICAR(lado > 0 && 2 * lado <= 64, "el QR de configuración entra en la OLED: %d módulos", lado);
+  char nombre[kLargoNombreBle + 1];
+  nombreBle("ESP32-001", nombre);
+  VERIFICAR(strcmp(nombre, "VTF-ESP32-001") == 0, "nombre Bluetooth: %s", nombre);
+  nombreBle("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", nombre);
+  VERIFICAR(strlen(nombre) == (size_t)kLargoNombreBle && strncmp(nombre, "VTF-ABCDEFGHIJKLMNOP", 20) == 0,
+            "nombre Bluetooth recortado a 20: %s", nombre);
+}
+
 int main() {
   pruebasSesion();
   pruebasTemperatura();
@@ -849,6 +1064,9 @@ int main() {
   pruebasCaidas();
   pruebasRespiracion();
   pruebasTelemetria();
+  pruebasBateria();
+  pruebasRedes();
+  pruebasFrCardiaca();
   pruebasVinculacion();
   printf("\n%d de %d verificaciones pasaron\n", total - fallas, total);
   return fallas == 0 ? 0 : 1;

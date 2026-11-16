@@ -12,6 +12,8 @@
 #include <atomic>
 
 #include "config.h"
+#include "config_wifi.h"
+#include "redes.h"
 #include "vinculacion.h"
 
 struct RedWifi {
@@ -44,7 +46,12 @@ const bool kTls = false;
 const int kPuertoBroker = MQTT_PUERTO;
 #endif
 
-const int kRedes = sizeof(REDES_WIFI) / sizeof(REDES_WIFI[0]);
+// Redes conocidas: primero las que se configuraron desde la app (redes.h, guardadas en la flash; la más
+// reciente primero) y después las de secretos.h que no estén repetidas. Se arma al arrancar la tarea.
+const int kMaxConocidas = ListaRedes::kMax + (int)(sizeof(REDES_WIFI) / sizeof(REDES_WIFI[0]));
+ListaRedes guardadas;
+RedWifi conocidas[kMaxConocidas];
+int nRedes = 0;  // cuántas conocidas hay
 const int kMaxCandidatos = 8;
 const uint32_t kTiempoConexionMs = 12000;
 const uint32_t kTiempoPubackMs = 10000;
@@ -86,6 +93,7 @@ QueueHandle_t colaComandos = nullptr;     // los encola el manejador de esp-mqtt
 std::atomic<uint32_t> conexiones{0};      // cada MQTT_EVENT_CONNECTED (antes que sus retenidos)
 uint32_t conexionesVistas = 0;
 std::atomic<bool> pedirQr{false};         // botón
+std::atomic<bool> pausar{false}, pausada{false};  // la configuración por la app toma el Wi-Fi (config_wifi.h)
 Vinculacion vinculo;                      // solo lo usa esta tarea
 
 // ---------- Broker y MQTT ----------
@@ -130,7 +138,7 @@ const char* hostBroker() {
 #ifdef MQTT_BROKER_TLS
   return MQTT_BROKER_TLS;  // el certificado se valida contra este nombre: nunca una IP ni un broker por red
 #endif
-  const char* h = redActual >= 0 ? REDES_WIFI[redActual].broker : nullptr;
+  const char* h = redActual >= 0 ? conocidas[redActual].broker : nullptr;
   return (h && *h) ? h : MQTT_BROKER_POR_DEFECTO;
 }
 
@@ -471,8 +479,8 @@ void armarCandidatos(int encontradas) {
   nCandidatos = 0;
   for (int i = 0; i < encontradas; i++) {
     const String ssid = WiFi.SSID(i);
-    for (int r = 0; r < kRedes; r++) {
-      if (strcasecmp(ssid.c_str(), REDES_WIFI[r].ssid) != 0) continue;
+    for (int r = 0; r < nRedes; r++) {
+      if (strcasecmp(ssid.c_str(), conocidas[r].ssid) != 0) continue;
       const int32_t rssi = WiFi.RSSI(i);
       int k = 0;
       while (k < nCandidatos && candidatos[k].red != r) k++;
@@ -495,7 +503,7 @@ void armarCandidatos(int encontradas) {
       strlcat(lista, WiFi.SSID(i).c_str(), sizeof lista);
       strlcat(lista, "\"", sizeof lista);
     }
-    Serial.printf("[red] Wi-Fi: ninguna red de secretos.h a la vista; se ven %d: %s%s\n", encontradas, lista,
+    Serial.printf("[red] Wi-Fi: ninguna red conocida a la vista; se ven %d: %s%s\n", encontradas, lista,
                   encontradas > 8 ? "..." : "");
   }
   for (int a = 1; a < nCandidatos; a++)  // de mejor a peor señal
@@ -504,12 +512,12 @@ void armarCandidatos(int encontradas) {
       candidatos[b] = candidatos[b - 1];
       candidatos[b - 1] = t;
     }
-  for (int r = 0; r < kRedes && nCandidatos < kMaxCandidatos; r++) {
+  for (int r = 0; r < nRedes && nCandidatos < kMaxCandidatos; r++) {
     bool esta = false;
     for (int k = 0; k < nCandidatos; k++) esta |= candidatos[k].red == r;
     if (!esta) {
       candidatos[nCandidatos] = {r, 0, {}, false, -127, {}};
-      strlcpy(candidatos[nCandidatos].ssid, REDES_WIFI[r].ssid, sizeof candidatos[nCandidatos].ssid);
+      strlcpy(candidatos[nCandidatos].ssid, conocidas[r].ssid, sizeof candidatos[nCandidatos].ssid);
       nCandidatos++;
     }
   }
@@ -517,7 +525,7 @@ void armarCandidatos(int encontradas) {
 
 void conectar(uint32_t ahora) {
   const Candidato& c = candidatos[iCandidato];
-  const RedWifi& r = REDES_WIFI[c.red];
+  const RedWifi& r = conocidas[c.red];
   if (c.visto)
     Serial.printf("[red] Wi-Fi: conectando a \"%s\" (%d dBm, canal %d)\n", c.ssid, (int)c.rssi, (int)c.canal);
   else
@@ -565,7 +573,7 @@ void atenderWifi(uint32_t ahora) {
       WiFi.scanDelete();
       iCandidato = 0;
       if (nCandidatos == 0) {
-        avisar("sin redes en secretos");
+        avisar("sin redes conocidas");
         esperarYReintentar(ahora);
       } else {
         conectar(ahora);
@@ -622,6 +630,32 @@ void atenderWifi(uint32_t ahora) {
   }
 }
 
+void cargarConocidas() {
+  configWifiCargarRedes(guardadas);
+  nRedes = 0;
+  for (int i = 0; i < guardadas.cantidad(); i++)
+    conocidas[nRedes++] = {guardadas.red(i).ssid, guardadas.red(i).clave, nullptr};
+  for (const RedWifi& r : REDES_WIFI) {
+    bool repetida = false;
+    for (int k = 0; k < nRedes; k++) repetida |= strcasecmp(conocidas[k].ssid, r.ssid) == 0;
+    if (!repetida) conocidas[nRedes++] = r;
+  }
+  Serial.printf("[red] Wi-Fi: %d redes conocidas (%d configuradas desde la app)\n", nRedes, guardadas.cantidad());
+}
+
+// La app configura el Wi-Fi por Bluetooth: se suelta todo (MQTT y Wi-Fi) y no se toca más hasta reiniciar
+void soltarParaConfigurar() {
+  detenerMqtt();
+  WiFi.scanDelete();
+  WiFi.disconnect();
+  estado.wifi = EstadoWifi::Buscando;
+  estado.ip[0] = 0;
+  estado.rssi = 0;
+  avisar("config. desde la app");
+  pausada = true;
+  Serial.println("[red] en pausa: el Wi-Fi lo configura la app");
+}
+
 void publicarEstado() {
   estado.pendientes = (uint16_t)bufer.cantidad();
   portENTER_CRITICAL(&candado);
@@ -642,9 +676,18 @@ void tareaRed(void*) {
   WiFi.setAutoReconnect(false); // la reconexión la maneja esta tarea (elige la mejor red)
   WiFi.setSleep(false);         // sin ahorro de energía del módem: menos latencia y cortes de MQTT
   WiFi.setTxPower(WIFI_POTENCIA_TX);
+  cargarConocidas();
 
   for (;;) {
     const uint32_t ahora = millis();
+    if (pausar) {
+      if (!pausada) {
+        soltarParaConfigurar();
+        publicarEstado();
+      }
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
     recibirLecturas();
     atenderWifi(ahora);
     atenderHora();
@@ -669,6 +712,10 @@ void redIniciar() {
 bool redEncolar(const Lectura& l) { return colaLecturas && xQueueSend(colaLecturas, &l, 0) == pdTRUE; }
 
 void redPedirQr() { pedirQr = true; }
+
+void redPausar() { pausar = true; }
+
+bool redPausada() { return pausada; }
 
 EstadoRed redEstado() {
   EstadoRed e;

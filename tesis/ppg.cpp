@@ -174,6 +174,9 @@ void ProcesadorPpg::registrarLatido() {
       }
     }
   }
+  r_.tLatido = (float)n_ / p_.fs;
+  r_.acIr = maxIr_ - minIr_;
+  r_.dcIr = dcIr_;
   muestraUltimoLatido_ = n_;
   r_.latidos++;
   intervaloValido_ = true;

@@ -31,6 +31,9 @@ struct ResultadoEcg {
   bool ruidosa = false;      // señal inservible: mucha interferencia de la red o saturación
   float ruidoRed = 0;        // conteos RMS de la interferencia de la red (lo que quita el notch)
   float saturacion = 0;      // fracción de muestras en los rieles del ADC (últimos ~2 s)
+  // Último QRS, para la FR desde el pulso (fr_cardiaca.h): su instante y la amplitud de la onda R
+  float tR = 0;              // s desde que arrancó el procesador
+  float amplitudR = 0;       // conteos del ADC (filtrados)
 };
 
 class ProcesadorEcg {

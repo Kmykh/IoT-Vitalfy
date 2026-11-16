@@ -22,7 +22,7 @@ mkdir -p salida
 rm -f salida/*.pbm
 "$CC" -std=c99 -O1 -c ../qrcodegen.c -o salida/qrcodegen.o
 "$CXX" -std=c++17 -O1 -DARDUINO=100 -Istubs -I"$GFX" -I.. \
-  ../pantallas.cpp ../ecg.cpp ../ppg.cpp ../temperatura.cpp ../vinculacion.cpp salida/qrcodegen.o \
+  ../pantallas.cpp ../bateria.cpp ../fr_cardiaca.cpp ../redes.cpp ../ecg.cpp ../ppg.cpp ../temperatura.cpp ../vinculacion.cpp salida/qrcodegen.o \
   "$GFX/Adafruit_GFX.cpp" vista_previa.cpp -o salida/vista_previa
 ./salida/vista_previa
 python3 vista_previa.py

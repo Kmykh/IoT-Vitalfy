@@ -20,5 +20,5 @@ mkdir -p salida
 "$CC" -std=c99 -O2 -Wall -c ../qrcodegen.c -o salida/qrcodegen.o  # generador de QR (C, de Nayuki)
 "$CXX" -std=c++17 -O2 -Wall -Wextra -I.. \
   ../ppg.cpp ../ecg.cpp ../caidas.cpp ../respiracion.cpp ../telemetria.cpp ../temperatura.cpp ../sesion.cpp \
-  ../vinculacion.cpp salida/qrcodegen.o pruebas.cpp -o salida/pruebas
+  ../vinculacion.cpp ../bateria.cpp ../redes.cpp ../fr_cardiaca.cpp salida/qrcodegen.o pruebas.cpp -o salida/pruebas
 ./salida/pruebas

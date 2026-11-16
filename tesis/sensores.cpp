@@ -152,6 +152,11 @@ std::atomic<uint32_t> escritasEcg{0};
 uint32_t leidasEcg = 0;
 uint8_t pinEcgSalida, pinEcgLoMas, pinEcgLoMenos;
 std::atomic<bool> moduloEcg{false};
+// Batería (bateria.h): la lee esta misma tarea, una vez por segundo. Si la leyera el loop, la tarea del ECG
+// podía interrumpirlo con el ADC1 tomado y su lectura fallaba (una muestra en 0: un pico falso en el trazo).
+int8_t pinBateria = -1;
+std::atomic<int> mvBateria{-1};
+std::atomic<uint32_t> lecturasBateria{0};
 
 // En el ESP32 clásico, los GPIO 34 a 39 son solo entrada y no tienen resistencias internas: pedírselas
 // no hace nada y ESP-IDF imprime un error en cada intento.
@@ -186,6 +191,12 @@ void tareaEcg(void*) {
       const bool presente = moduloResponde();
       if (presente == anterior) moduloEcg = presente;
       anterior = presente;
+      if (pinBateria >= 0) {  // ~8 × 20 µs: el ECG apenas se corre en este ciclo
+        uint32_t suma = 0;
+        for (int k = 0; k < 8; k++) suma += analogReadMilliVolts(pinBateria);
+        mvBateria = (int)(suma / 8);
+        lecturasBateria++;
+      }
     }
     const bool suelto = digitalRead(pinEcgLoMas) == HIGH || digitalRead(pinEcgLoMenos) == HIGH;
     if (suelto) {
@@ -408,6 +419,17 @@ void ecgIniciar(uint8_t pinSalida, uint8_t pinLoMas, uint8_t pinLoMenos) {
 }
 
 bool ecgModuloPresente() { return moduloEcg; }
+
+void bateriaIniciar(int8_t pin) {
+  if (pin < 0) return;
+  pinMode(pin, INPUT);
+  analogSetPinAttenuation(pin, ADC_11db);  // hasta ~3,1 V: la batería llena da 2,1 V en el pin
+  pinBateria = pin;
+}
+
+int bateriaMvPin() { return mvBateria; }
+
+uint32_t bateriaLecturas() { return lecturasBateria; }
 
 int ecgLeer(MuestraEcg* destino, int max) {
   const uint32_t escritas = escritasEcg.load(std::memory_order_acquire);
