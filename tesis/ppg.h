@@ -39,6 +39,10 @@ struct ResultadoPpg {
   float perfusion = 0;   // índice de perfusión del último latido, en %
   uint8_t progreso = 0;  // 0..100 mientras busca los primeros latidos
   uint32_t latidos = 0;  // latidos desde que se puso el dedo
+  // Último latido, para la FR desde el pulso (fr_cardiaca.h): su instante, la amplitud y la línea de base
+  float tLatido = 0;     // s desde que arrancó el procesador
+  float acIr = 0;        // amplitud del pulso IR (pico a valle) del intervalo que terminó
+  float dcIr = 0;        // nivel medio IR
 };
 
 class ProcesadorPpg {

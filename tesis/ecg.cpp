@@ -204,6 +204,8 @@ void ProcesadorEcg::aceptarQrs(uint32_t muestra, float pendiente, uint32_t picoR
   }
   ultimoQrs_ = muestra;
   ultimoPicoR_ = picoR;
+  r_.tR = (float)picoR / p_.fs;
+  r_.amplitudR = fabsf(historial_[picoR % kHistorial]);
   pendienteUltimoQrs_ = pendiente;
   mejorCandidato_ = 0;
   r_.latidos++;
