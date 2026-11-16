@@ -36,6 +36,8 @@ size_t construirJsonTelemetria(const char* dispositivo, const Lectura& l, char* 
     const int t = l.tempDecimas;
     agregar(snprintf(buf + n, tam - n, ",\"temp\":%s%d.%d", t < 0 ? "-" : "", abs(t) / 10, abs(t) % 10));
   }
-  if (n < tam) agregar(snprintf(buf + n, tam - n, ",\"caida\":%s}", l.caida ? "true" : "false"));
+  if (n < tam) agregar(snprintf(buf + n, tam - n, ",\"caida\":%s", l.caida ? "true" : "false"));
+  if (n < tam && l.bateria >= 0) agregar(snprintf(buf + n, tam - n, ",\"bateria\":%d", l.bateria));
+  if (n < tam) agregar(snprintf(buf + n, tam - n, "}"));
   return n < tam ? n : 0;
 }

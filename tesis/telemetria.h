@@ -2,11 +2,11 @@
 // (Vitalify/Backend/docs/contrato-telemetria.md):
 //
 //   {"dispositivo":"ESP32-001","ts":"2026-09-30T14:05:10.250Z","seq":18234,
-//    "fc":82,"fr":16,"spo2":97,"temp":36.8,"caida":false}
+//    "fc":82,"fr":16,"spo2":97,"temp":36.8,"caida":false,"bateria":87}
 //
 // Una variable que el sensor no midió se omite (el backend la trata como ausente). La FR sale del
-// MPU6050 (respiracion.h) y solo va con el paciente quieto. Este wearable no mide pas, pad ni bateria,
-// así que nunca los envía.
+// MPU6050 (respiracion.h) y solo va con el paciente quieto. La batería (bateria.h, 0–100 %) va solo si
+// el divisor está conectado. Este wearable no mide pas ni pad, así que nunca los envía.
 // C++ puro: se prueba en el computador (pruebas/).
 #pragma once
 
@@ -24,6 +24,7 @@ struct Lectura {
   int16_t spo2 = -1;     // %; -1 = no medido
   int16_t tempDecimas = kSinTemperatura;  // °C × 10
   bool caida = false;
+  int8_t bateria = -1;   // %; -1 = sin medición (no es un signo: sola no hace una lectura)
 
   bool tieneDatos() const { return fc >= 0 || fr >= 0 || spo2 >= 0 || tempDecimas != kSinTemperatura || caida; }
 };
