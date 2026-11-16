@@ -31,11 +31,14 @@ static VistaPrincipal base() {
   v.acelerometro = true;
   v.fr = 16;
   v.estadoFr = EstadoRespiracion::Valida;
+  v.fuenteFr = FuenteFr::MpuYPulso;  // el MPU y el pulso coinciden
   v.cama = "MED-B-01";  // vinculado: solo cama e iniciales
   v.iniciales = "R.M.";
   v.codigo = "ESP32-001";
   v.red = "MiRedCasa";
   v.sesionActiva = true;
+  v.bateria = 87;  // LiPo con el divisor en VP (bateria.h)
+  v.estadoBateria = EstadoBateria::Normal;
   v.ms = 1000;
   return v;
 }
@@ -51,7 +54,14 @@ int main() {
   vq.codigo = "ESP32-001";
   vq.wifiBarras = 3;
   vq.broker = 2;
+  vq.bateria = 87;
+  vq.estadoBateria = EstadoBateria::Normal;
+  vq.horaValida = true;
+  vq.hora = 14;
+  vq.minuto = 5;
+  vq.red = "Hospital-Medicina";
   vq.ms = 400;
+  vq.msPantalla = 5000;  // ya terminó su animación de entrada
   dibujarVinculacion(principal, vq);
   guardar(principal, "00a_vinculacion_qr");
   dibujarPasosVinculo(ecg, vq);
@@ -103,18 +113,105 @@ int main() {
   dibujarVinculacion(principal, vq);
   guardar(principal, "00f_desvinculado");
 
+  // Configuración del Wi-Fi desde la app por Bluetooth (BOOT 3 s, o solo sin red conocida)
+  VistaConfigWifi cw;
+  cw.qr = "VTFW:ESP32-001:K7P3QX9M";
+  cw.pop = "K7P3QX9M";
+  cw.codigo = "ESP32-001";
+  cw.bateria = 87;
+  cw.estadoBateria = EstadoBateria::Normal;
+  cw.ms = 400;
+  dibujarConfigWifi(principal, cw);
+  guardar(principal, "14a_wifi_qr");
+  dibujarPasosConfigWifi(ecg, cw);
+  guardar(ecg, "14a_wifi_qr_oled_ecg");
+  cw.etapa = EtapaConfigWifi::AppConectada;
+  dibujarConfigWifi(principal, cw);
+  guardar(principal, "14b_wifi_app_conectada");
+  dibujarPasosConfigWifi(ecg, cw);
+  guardar(ecg, "14b_wifi_app_conectada_oled_ecg");
+  cw.etapa = EtapaConfigWifi::Probando;
+  cw.ssid = "Hospital-Medicina";
+  cw.ms = 1300;
+  dibujarConfigWifi(principal, cw);
+  guardar(principal, "14c_wifi_probando");
+  cw.etapa = EtapaConfigWifi::Fallo;
+  cw.fallo = FalloConfigWifi::Clave;
+  dibujarConfigWifi(principal, cw);
+  guardar(principal, "14d_wifi_clave_incorrecta");
+  dibujarPasosConfigWifi(ecg, cw);
+  guardar(ecg, "14d_wifi_clave_incorrecta_oled_ecg");
+  cw.etapa = EtapaConfigWifi::Lista;
+  cw.fallo = FalloConfigWifi::Ninguno;
+  dibujarConfigWifi(principal, cw);
+  guardar(principal, "14e_wifi_listo");
+  dibujarPasosConfigWifi(ecg, cw);
+  guardar(ecg, "14e_wifi_listo_oled_ecg");
+
+  // Animaciones: cuadros sueltos del arranque (el logo se arma, se corre y se escribe el nombre) y de la
+  // entrada del QR (el cuadro crece y los módulos aparecen en diagonal)
+  VistaArranque anim;
+  anim.version = "2.5.0";
+  anim.codigo = "ESP32-001";
+  anim.ppg = anim.acelerometro = anim.temperatura = anim.ecgModulo = true;
+  const uint32_t tiempos[] = {150, 450, 800, 1100, 1650, 2200};
+  for (const uint32_t t : tiempos) {
+    anim.ms = t;
+    char nombre[40];
+    snprintf(nombre, sizeof nombre, "15_anim_arranque_%04u", (unsigned)t);
+    dibujarArranque(principal, anim);
+    guardar(principal, nombre);
+  }
+  VistaVinculacion animQr = vq;
+  animQr.pantalla = PantallaVinculo::Qr;
+  animQr.segundosRestantes = 572;
+  const uint32_t tiemposQr[] = {120, 380, 550, 900};
+  for (const uint32_t t : tiemposQr) {
+    animQr.msPantalla = t;
+    char nombre[40];
+    snprintf(nombre, sizeof nombre, "16_anim_qr_%04u", (unsigned)t);
+    dibujarVinculacion(principal, animQr);
+    guardar(principal, nombre);
+  }
+
+  // Al encender: la presentación con el logo en las dos OLED (la barra sube con cada chequeo)
+  VistaArranque p0;
+  p0.version = "2.5.0";
+  p0.codigo = "ESP32-001";
+  p0.ppg = p0.acelerometro = p0.temperatura = p0.ecgModulo = true;
+  p0.bateria = 87;
+  p0.estadoBateria = EstadoBateria::Normal;
+  p0.ms = 2300;
+  dibujarArranque(principal, p0);
+  guardar(principal, "00_presentacion_wifi");
+  dibujarVerificacion(ecg, p0);
+  guardar(ecg, "00_presentacion_wifi_oled_ecg");
+  p0.wifi = true;
+  p0.wifiBarras = 3;
+  p0.red = "Hospital-Medicina";
+  p0.broker = 2;
+  p0.ms = 2400;
+  dibujarArranque(principal, p0);
+  guardar(principal, "00_presentacion_lista");
+  dibujarVerificacion(ecg, p0);
+  guardar(ecg, "00_presentacion_lista_oled_ecg");
+
   VistaArranque a;
-  a.version = "2.0.0";
+  a.version = "2.5.0";
+  a.bateria = 87;
+  a.estadoBateria = EstadoBateria::Normal;
   a.codigo = "ESP32-001";
-  a.ppg = a.acelerometro = a.temperatura = a.ecgModulo = true;  // los cuatro sensores; falta la red
-  a.ms = 400;
+  a.ppg = a.acelerometro = a.ecgModulo = true;  // falta la sonda: pasados 3 s, el chequeo detallado
+  a.ms = 3400;
   dibujarArranque(principal, a);
-  guardar(principal, "01a_arranque_conectando");
-  a.electrodos = a.wifi = true;
+  guardar(principal, "01a_arranque_falta_sensor");
+  a.temperatura = a.wifi = true;
+  a.acelerometro = false;
   a.broker = 2;
   a.red = "MiRedCasa";
+  a.ms = 4600;
   dibujarArranque(principal, a);
-  guardar(principal, "01b_arranque_todo_conectado");
+  guardar(principal, "01b_arranque_falta_acelerometro");
 
   // Sin paciente: qué falta conectar
   VistaPrincipal v = base();
@@ -223,11 +320,30 @@ int main() {
   dibujarPrincipal(principal, v);
   guardar(principal, "09c_aviso_del_backend");
 
+  // Batería: crítica (la pila parpadea y el pie alterna con la temperatura) y sin el divisor ("--")
+  v = base();
+  v.fc = 74;
+  v.spo2 = 97;
+  v.bateria = 8;
+  v.estadoBateria = EstadoBateria::Critica;
+  v.ms = 0;
+  dibujarPrincipal(principal, v);
+  guardar(principal, "09d_bateria_critica");
+  v.bateria = 18;
+  v.estadoBateria = EstadoBateria::Baja;
+  v.ms = 1000;
+  dibujarPrincipal(principal, v);
+  guardar(principal, "09e_bateria_baja");
+  v.bateria = -1;
+  v.estadoBateria = EstadoBateria::SinMedicion;
+  dibujarPrincipal(principal, v);
+  guardar(principal, "09f_bateria_sin_divisor");
+
   // ECG: 6 s de señal sintética pasada por el mismo filtro del firmware
   ProcesadorEcg p;
   GeneradorEcg gen;
   gen.fc = 72;
-  BarridoEcg barrido(8, 97);  // OLED 128x32: 97 columnas de trazo y el panel de la FC
+  BarridoEcg barrido(8, 128);  // OLED 128x32: el trazo a todo lo ancho
   VistaEcg ve;
   for (int i = 0; i < 250 * 6; i++) {
     bool latido = false;
@@ -237,6 +353,14 @@ int main() {
   ve.electrodos = true;
   ve.fc = p.resultado().fc;
   ve.pulso = true;
+  ve.wifiBarras = 3;  // el estado del equipo va en esta OLED
+  ve.broker = 2;
+  ve.pendientes = 3;
+  ve.bateria = 87;
+  ve.estadoBateria = EstadoBateria::Normal;
+  ve.horaValida = true;
+  ve.hora = 14;
+  ve.minuto = 5;
   dibujarEcg(ecg, barrido, ve);
   guardar(ecg, "10_ecg");
 
@@ -254,16 +378,10 @@ int main() {
 
   // OLED del ECG durante el arranque: verificación animada
   VistaArranque va;
-  va.ppg = va.acelerometro = va.temperatura = va.ecgModulo = va.wifi = true;
+  va.ppg = va.temperatura = va.ecgModulo = va.wifi = true;  // falta el acelerómetro pasados 3 s
   va.broker = 1;
-  va.ms = 1150;
+  va.ms = 4150;
   dibujarVerificacion(ecg, va);
-  guardar(ecg, "12_ecg_verificando");
-
-  va.electrodos = true;
-  va.broker = 2;
-  va.ms = 1700;
-  dibujarVerificacion(ecg, va);
-  guardar(ecg, "13_ecg_verificacion_lista");
+  guardar(ecg, "12_ecg_verificando_falta_sensor");
   return 0;
 }
