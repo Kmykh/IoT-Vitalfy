@@ -7,7 +7,7 @@
 // Las claves (redes Wi-Fi y MQTT) van aparte, en secretos.h, que no se versiona.
 #pragma once
 
-#define FIRMWARE_VERSION "2.1.0"
+#define FIRMWARE_VERSION "2.5.0"
 
 // ============================ Dispositivo ============================
 // Código con el que el administrador registró el sensor en Vitalify (POST /api/v1/dispositivos,
@@ -52,6 +52,7 @@
 #define PIN_ECG_LO_MENOS 35 // AD8232 LO-
 #define PIN_ECG_LO_MAS 32   // AD8232 LO+. SDN al aire o a 3V3: SDN a GND APAGA el AD8232
 #define PIN_LED_OK 27       // LED verde (ánodo, con resistencia de 220–330 Ω; cátodo a GND): todo funciona
+#define PIN_BATERIA 36      // VP: divisor 100 kΩ + 100 kΩ desde el + de la LiPo (bateria.h). Sin él, "--"
 #else
 // ESP32-S3 Zero
 #define PIN_I2C_SDA 5       // bus 0: MAX30102 (0x57), ADXL345 (0x53), OLED principal 128x64 (0x3C)
@@ -63,6 +64,7 @@
 #define PIN_ECG_LO_MENOS 2  // AD8232 LO-
 #define PIN_ECG_LO_MAS 3    // AD8232 LO+. SDN al aire o a 3V3: SDN a GND APAGA el AD8232
 #define PIN_LED_OK -1       // sin LED verde
+#define PIN_BATERIA -1      // sin divisor de batería
 #endif
 #define PIN_BOTON 0         // botón BOOT de la placa: en el arranque, sigue aunque falte un sensor
 
@@ -83,5 +85,9 @@
 // Colóquela en la axila: en la mano o al aire marca 24–33 °C, que no es la temperatura corporal.
 #define TEMP_MIN_CONTACTO 32.0f  // °C: por debajo, la sonda está al aire y no se envía
 #define TEMP_CORRECCION_C 0.0f   // °C a sumar: diferencia medida contra un termómetro clínico en el mismo sitio
+
+// Batería LiPo de 1 celda (bateria.h): Vbat = Vpin × divisor × corrección
+#define BATERIA_DIVISOR 2.0f     // dos resistencias iguales (100 kΩ + 100 kΩ)
+#define BATERIA_CORRECCION 1.0f  // Vmultímetro / Vmostrado en el monitor serie, si no coinciden
 
 #define ECG_FRECUENCIA_RED_HZ 60  // interferencia de la red eléctrica que filtra el notch (Perú: 60 Hz)
