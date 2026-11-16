@@ -2,6 +2,8 @@
 
 Firmware del wearable (ESP32-S3 Zero) y configuración de la red por donde viajan sus datos hasta el backend.
 
+![Encendido: el logo se arma, se conecta y aparece el QR](encendido_oled.gif)
+
 ![Pantallas de las OLED](pantallas_oled.png)
 
 ## Cómo llegan los datos al backend
@@ -25,13 +27,14 @@ MPU6050  (caídas,  ─┘                            en la laptop)             
 | Solicitudes | `device/ESP32-001/solicitudes`: el wearable pide un QR nuevo con `{"accion":"solicitar-qr"}` |
 
 ```json
-{"dispositivo":"ESP32-001","ts":"2026-09-30T14:05:10.250Z","seq":18234,"fc":82,"fr":16,"spo2":97,"temp":36.8,"caida":false}
+{"dispositivo":"ESP32-001","ts":"2026-09-30T14:05:10.250Z","seq":18234,"fc":82,"fr":16,"spo2":97,"temp":36.8,"caida":false,"bateria":87}
 ```
 
 - `ts` es el instante de la medición en UTC (NTP), con milisegundos. Una lectura tomada antes de tener hora recibe su hora real al sincronizar.
 - Lo que el sensor no midió se omite: sin dedo no van `fc` ni `spo2` (salvo que la FC venga del ECG), sin sonda no va `temp`, y sin el paciente quieto no va `fr`. Sin paciente conectado no se envía nada, y tampoco si el wearable no está vinculado a un paciente.
 - La **FR** sale del MPU6050: el wearable va sujeto sobre el tórax o el abdomen y la respiración lo inclina unos grados (ver *Algoritmos*).
-- Este hardware no mide `pas`, `pad` ni `bateria`. El backend calcula NEWS2 y MEWS con FC, FR, SpO2 y temperatura y marca el puntaje como parcial; la enfermera completa presión, conciencia y oxígeno con `POST /api/v1/pacientes/{id}/observaciones` (`Backend/docs/motor-clinico.md`).
+- `bateria` (0–100 %) va solo con el divisor de la batería conectado (ver *Batería*); sin él se omite.
+- Este hardware no mide `pas` ni `pad`. El backend calcula NEWS2 y MEWS con FC, FR, SpO2 y temperatura y marca el puntaje como parcial; la enfermera completa presión, conciencia y oxígeno con `POST /api/v1/pacientes/{id}/observaciones` (`Backend/docs/motor-clinico.md`).
 - Se verificó con el código del backend: los JSON del firmware pasan por `MensajeTelemetria.Interpretar` y `EvaluadorSignos` sin errores.
 
 ## Estructura
@@ -44,7 +47,11 @@ tesis_V01/
 │   ├── secretos.h       redes Wi-Fi, clave MQTT y broker de producción (no se versiona; plantilla: secretos.example.h)
 │   ├── red.*            Wi-Fi, NTP, MQTT (TLS en producción), comandos del backend y búfer offline (tarea propia en el núcleo 0)
 │   ├── raices_tls.h     raíces de Let's Encrypt (ISRG Root X1 y X2) para el broker de producción
-│   ├── sensores.*       MAX30102, MPU6050 (o ADXL345), DS18B20 y AD8232
+│   ├── sensores.*       MAX30102, MPU6050 (o ADXL345), DS18B20, AD8232 y el pin de la batería
+│   ├── bateria.*        carga de la LiPo: voltaje → %, suavizado y "sin medición" (C++ puro, probado)
+│   ├── fr_cardiaca.*    FR desde el pulso (ECG y PPG) y su fusión con la del MPU6050 (C++ puro, probado)
+│   ├── redes.*          redes configuradas desde la app, código de un solo uso y QR del modo Wi-Fi (C++ puro, probado)
+│   ├── config_wifi.*    modo de configuración del Wi-Fi por Bluetooth (aprovisionamiento de Espressif)
 │   ├── ppg.*  ecg.*  caidas.*  respiracion.*  filtros.h    algoritmos (C++ puro, probados en el computador)
 │   ├── vinculacion.*    comandos del backend, estado de la vinculación y QR (C++ puro, probado)
 │   ├── qrcodegen.*      generador de QR de Nayuki (MIT, v1.8.0)
@@ -83,7 +90,7 @@ Si actualizaste desde una versión anterior, **reinicia el broker** (`docker com
 Arduino IDE 2:
 
 1. **Preferencias → Ubicación del sketchbook:** esta carpeta (`tesis_V01`), para que use `libraries/`.
-2. **Placa:** *ESP32S3 Dev Module* (core *esp32* de Espressif 3.3.x), **USB CDC On Boot: Enabled**.
+2. **Placa:** *ESP32S3 Dev Module* (core *esp32* de Espressif 3.3.x), **USB CDC On Boot: Enabled**. Con el ESP32 DevKit, *ESP32 Dev Module*. En las dos, **Partition Scheme: Huge APP (3MB No OTA/1MB SPIFFS)**: con el Bluetooth de la configuración del Wi-Fi el firmware pesa ~2 MB y no entra en la partición por defecto (1,25 MB).
 3. Revisa `CODIGO_DISPOSITIVO` y `MQTT_BROKER_POR_DEFECTO` en `config.h`, y tus redes en `secretos.h`. Para el servidor de producción, ver [Producción](#producción-servidor-con-tls).
 4. Compila y sube `tesis/tesis.ino`.
 
@@ -92,15 +99,15 @@ En una Mac con Apple Silicon, el Arduino IDE usa un `ctags` compilado para Intel
 Con `arduino-cli`, desde esta carpeta:
 
 ```bash
-arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc --libraries libraries tesis
-arduino-cli upload  --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc -p /dev/cu.usbmodem* tesis
+arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app --libraries libraries tesis
+arduino-cli upload  --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app -p /dev/cu.usbmodem* tesis
 ```
 
 Con un **ESP32 DevKit** (ESP32 clásico, USB por CH340), la placa es *ESP32 Dev Module* y `config.h` toma sus pines solo:
 
 ```bash
-arduino-cli compile --fqbn esp32:esp32:esp32 --libraries libraries tesis
-arduino-cli upload  --fqbn esp32:esp32:esp32:UploadSpeed=460800 -p /dev/cu.usbserial-* tesis
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --libraries libraries tesis
+arduino-cli upload  --fqbn esp32:esp32:esp32:PartitionScheme=huge_app,UploadSpeed=460800 -p /dev/cu.usbserial-* tesis
 ```
 
 ### 4. Verificar
@@ -117,7 +124,7 @@ Monitor serie a 115200 baudios:
 MONITOREO (vinculado) | FC 72 (PPG) | SpO2 98 | FR 16 | dedo SI IR 52341 PI 1.20% | T 36.8 C | reposo | ECG sin electrodos | Wi-Fi MiRedCasa -58 dBm | MQTT OK | pendientes 0, enviadas 12
 ```
 
-La tecla `p` en el monitor activa el trazado del ECG para el Serial Plotter. En la laptop, `broker/escuchar.sh` muestra los mismos mensajes que recibirá el backend.
+La tecla `p` en el monitor activa el trazado del ECG para el Serial Plotter y la `w`, el modo de configuración del Wi-Fi desde la app. En la laptop, `broker/escuchar.sh` muestra los mismos mensajes que recibirá el backend.
 
 ## Conexiones (ESP32-S3 Zero)
 
@@ -137,6 +144,23 @@ La tecla `p` en el monitor activa el trazado del ECG para el Serial Plotter. En 
 | DS18B20 | Datos → GPIO25 | Resistencia de 4,7 kΩ entre datos y 3V3 |
 | AD8232 | OUTPUT → GPIO34, LO− → GPIO35, LO+ → GPIO32 | GPIO34 es ADC1 (funciona con el Wi-Fi encendido). 34 y 35 son solo entrada y no tienen pull-up interna: con una de 10 kΩ de GPIO35 a 3V3, un cable de LO− suelto se ve como "electrodos desconectados" en vez de ruido |
 | LED verde | GPIO27 (D27) → resistencia de 220–330 Ω → ánodo; cátodo → GND | Encendido: todo funciona (ver *Pantallas*) |
+| Batería (divisor) | + de la LiPo, después del interruptor → 100 kΩ → **VP (GPIO 36)** → 100 kΩ → GND | Ver *Batería*. VP es ADC1 y solo entrada: funciona con el Wi-Fi encendido |
+
+### Batería
+
+El wearable funciona con una **LiPo de 1 celda** (3,7 V nominal; 503562, 1250 mAh): llena a 4,2 V y vacía a ~3,3 V. El ESP32 no puede medir su propia batería, así que el firmware la lee con un divisor de dos resistencias iguales en VP:
+
+```
++B (después del SWITCH) ──[100 kΩ]──┬── VP (GPIO 36)
+                                    ├──[100 kΩ]── GND
+                                    └──[100 nF]── GND   (opcional: estabiliza la lectura)
+```
+
+- **Después del interruptor:** apagado, el divisor no gasta nada; encendido consume ~21 µA, despreciable para 1250 mAh.
+- **Lectura** (`bateria.h`): la tarea del ECG lee el pin una vez por segundo (promedio de 8 muestras), para no cruzarse con ella en el ADC. El voltaje se suaviza unos 10 s, porque el Wi-Fi lo hace caer al transmitir, y el porcentaje cambia de a 3 puntos o más, así no salta entre dos valores. La curva voltaje → % es la de una LiPo con poca carga: 3,84 V = 50 %, 3,73 V = 20 %.
+- **Estados:** **baja** con el 20 % o menos (la pila queda con una barra) y **crítica** con el 10 % o menos (la pila parpadea y el pie de los signos alterna con `Batería baja: cargue`).
+- **Sin divisor:** el pin queda al aire y lee cerca de 0 V; la OLED muestra `--` y no se envía `bateria`.
+- **Calibración:** el monitor serie muestra cada 5 s `Bateria 72% 3.88 V (pin 1940 mV)`. Si el multímetro en el + de la batería marca otro voltaje, se ajusta `BATERIA_CORRECCION` en `config.h` (Vmultímetro / Vmostrado). Con otras resistencias, `BATERIA_DIVISOR` = (R1 + R2) / R2.
 
 **MPU6050** (módulo GY-521): VCC a 3V3, AD0 a GND o al aire (dirección 0x68; con AD0 a 3V3, 0x69, también funciona). Si no lo encuentra, el firmware usa un ADXL345 en 0x53 (la protoboard anterior). Para medir la FR, **el wearable va sujeto con la correa sobre el tórax o el abdomen**: en la mano o sobre la mesa no hay respiración que medir.
 
@@ -146,38 +170,65 @@ Todos los módulos a 3V3 y GND del mismo riel. El Wi-Fi transmite a 11 dBm (`WIF
 
 Cada OLED tiene su función: la principal muestra el chequeo y los signos, y la delgada, la verificación y el ECG. Los números entre paréntesis son las vistas de `pantallas_oled.png`.
 
+**Logo.** `kLogoGrande` (55x54), `kLogoChico` (28x27) y `kLogoMini` (15x14) en `pantallas.cpp` son el logo de Vitalify pixelado desde el original y simétrico, con los dos trazos de alerta aparte, que aparecen a los 0,4 s. Se ve apenas se inician las OLED, antes de los sensores y la red, así nunca queda la memoria de la pantalla con ruido.
+
+**Minimalista y en movimiento (firmware 2.5).** Mientras no hay paciente, la principal anima a 25 cuadros por segundo: el logo al encender, el QR que se arma y los mensajes que entran. Sin recuadros de más: los pies son texto bajo una línea fina punteada, y solo las alarmas van en una píldora llena. Con el paciente vuelve a 5 cuadros por segundo, así el bus I2C queda libre para el oxímetro y el acelerómetro. `encendido_oled.gif` muestra el encendido con el código real del firmware.
+
+**Un solo estilo en las dos (firmware 2.2 y 2.3).** Todas las pantallas se arman con las mismas piezas (`pantallas.cpp`):
+
+- **Tres fuentes:** la clásica 5x7 para los textos, FreeSansBold 9 pt para los títulos y FreeSansBold 18 pt para la FC y la SpO2.
+- **La misma barra de estado** arriba en la OLED principal: Wi-Fi, servidor, lecturas pendientes, **batería** (`87%` y una pila que se llena) y hora.
+- **Línea de contexto:** debajo de la barra, el código del sensor o, con un paciente, la cama y las iniciales.
+- **Cuerpo de los mensajes:** ícono y título centrados juntos y un subtítulo. Los íconos son: Wi-Fi para "Conectando", un QR para "Pidiendo QR", un reloj de arena para "QR vencido", un teléfono para "Emparejando", ✔ para "Vinculado" y un enchufe para "Liberado".
+- **Pie en una píldora:** con borde, dice qué hacer (`BOOT: pedir otro`, `Coloque los sensores`); llena y parpadeando, es una alarma (caída, aviso del backend, batería crítica).
+- **Las mismas piezas en la OLED de 128x32:** píldoras (`1/3`, `5/6`, `ECG ♥`), barras de progreso redondeadas, ✓ ○ ✗ y el corazón que late.
+- **QR más amable:** en un cuadro claro con esquinas redondeadas y con los tres patrones de posición redondeados. A la derecha, la cuenta regresiva en grande con un reloj y una barra que se vacía. Se comprobó con un lector de QR (zxing-cpp) con un código corto, uno de 32 caracteres y uno mínimo, con la imagen nítida y desenfocada, y con la franja sin píxeles de las OLED bicolor.
+
+**Color.** El color lo da cada panel, no el firmware: la OLED principal bicolor es amarilla en las 16 filas de arriba y azul en el resto, y la de 0,91" es de un solo color. Por eso el diseño deja la barra de estado y el contexto en la franja amarilla y todo lo demás en la azul. Para que las dos se vean del mismo color, la principal tiene que ser una OLED de 0,96" **monocolor** del mismo color que la de 0,91" (misma dirección 0x3C y mismo SSD1306: no hay que cambiar nada del firmware).
+
 | Momento | OLED principal (128x64) | OLED del ECG (128x32) | LED verde |
 |---|---|---|---|
-| Arranque | Chequeo de SpO2, Acel, Temp, ECG, Wi-Fi y servidor (`01a`, `01b`) | Verificación animada: qué falta, `n/6`, latido y barra de progreso (`12`, `13`) | Se enciende cuando todo responde |
-| Sin servidor todavía | "Conectando": Wi-Fi y servidor con ✓ u ○, y abajo la red o "Use una red 2,4 GHz" (`00b1`, `00b2`) | Los tres pasos de la vinculación (`00b1`) | Apagado |
-| Sin vincular | El QR para la app de la enfermera, el código del sensor, cuánto le queda y una barra que se vacía en los 10 min (`00a`); "Pidiendo QR" (`00b3`), "QR vencido" (`00c`) o "Emparejando" mientras registra al paciente (`00d`) | Los tres pasos: QR → App → Listo, con el actual parpadeando (`00a`, `00d`) | Encendido si el equipo está bien |
-| Al vincular / desvincular | 5 s de "✓ Vinculado" con la cama y las iniciales (`00e`), o de "Desvinculado" antes del QR nuevo (`00f`) | Los tres pasos completos (`00e`) | Encendido si el equipo está bien |
-| Espera del paciente | "Conecte al paciente" con ✓, ○ o ✗ por sensor (`01c`, `01d`) | ECG; sin electrodos, "Electrodos desconectados" (`11`) | Encendido si el equipo está bien |
-| Monitoreo | Signos: FC, SpO2, temperatura y alerta de caída (`02` a `09`) | ECG en barrido con la FC del ECG (`10`); con mala señal, "Señal con ruido" (`11b`) | Encendido si el equipo está bien |
+| Al encender | **El logo se arma** (la cabeza crece y los brazos se abren), se corre a la izquierda y "Vitalify" se escribe letra por letra; debajo, qué hace en palabras simples ("Buscando Wi-Fi", "Conectando al sistema", "Listo") y una línea que avanza. Los dos trazos del logo laten mientras se conecta y quedan fijos al terminar (`15_anim_arranque_*`, `00_presentacion`) | **Estado del equipo** para cualquier persona: batería (`87%`), Wi-Fi (el nombre de la red) y sistema (`en línea`), cada uno con ✓ cuando está bien; a la izquierda, el logo y un latido que dice que el equipo está vivo |
+| Arranque con un sensor faltante (después de 3 s) | Chequeo de SpO2, Acel., Temp., ECG, Wi-Fi y servidor con ✓, ✗ u ○, con el logo mini, la versión y la batería (`01a`, `01b`) | Qué falta, `n/6`, latido y barra de progreso (`12`) | Se enciende cuando todo responde |
+| Sin servidor todavía | El logo y "Buscando Wi-Fi" o "Conectando al sistema", con una línea que se mueve (`00b1`, `00b2`) | El estado del equipo | Apagado |
+| Sin vincular | **El QR se arma** (el cuadro crece y los módulos aparecen en diagonal) y a la derecha entran el código del sensor, "Escanee con la app" y cuánto le queda en grande, con una línea que se acorta en los 10 min (`16_anim_qr_*`, `00a`); "Pidiendo el QR" (`00b3`), "QR vencido" (`00c`) o "Emparejando" mientras registra al paciente (`00d`) | El estado del equipo | Encendido si el equipo está bien |
+| Al vincular / desvincular | 5 s de "✔ Vinculado" con la cama y las iniciales (`00e`), o de "Liberado: sensor desvinculado" antes del QR nuevo (`00f`); los mensajes entran deslizándose | El estado del equipo | Encendido si el equipo está bien |
+| Espera del paciente | "Conecte al paciente" con ✓, ○ o ✗ por sensor (`01c`, `01d`) | ECG; sin electrodos, "Conecte los electrodos" (`11`) | Encendido si el equipo está bien |
+| Monitoreo | Signos: FC, SpO2, temperatura, FR y alerta de caída (`02` a `09c`); batería baja, crítica y sin divisor (`09d` a `09f`) | ECG en barrido con la FC del ECG (`10`); con mala señal, "Señal con ruido" (`11b`) | Encendido si el equipo está bien |
 
-**Arranque.** La pantalla de chequeo muestra SpO2, Acel, Temp, ECG (el módulo AD8232), Wi-Fi y servidor (el broker MQTT). **No sigue mientras algún sensor diga NO** (se reintenta solo: puedes conectarlos en caliente); con todo OK espera la conexión al broker hasta 25 s y muestra "Todo conectado". El botón **BOOT** de la placa sigue igual aunque falte algo. Los electrodos ya no se esperan aquí: con la vinculación por QR se colocan en el paciente después de vincular, y la pantalla "Conecte al paciente" los pide. Si un chip responde en 0x68/0x69 pero no se reconoce, el monitor serie dice su `WHO_AM_I` (se aceptan el MPU6050 y sus variantes MPU6500, 6515, 9250 y 9255; el de este GY-521 es un MPU-6515, `0x74`).
+**Arranque.** Siempre empieza con la presentación del logo y su barra de carga. Si pasados 3 s falta un sensor, cambia al chequeo detallado de SpO2, Acel., Temp., ECG (el módulo AD8232), Wi-Fi y servidor (el broker MQTT), para ver cuál es. **No sigue mientras algún sensor tenga ✗** (se reintenta solo: puedes conectarlos en caliente); con todo OK espera la conexión al broker hasta 25 s y muestra `✓ Listo` en la presentación. El botón **BOOT** de la placa sigue igual aunque falte algo. Los electrodos ya no se esperan aquí: con la vinculación por QR se colocan en el paciente después de vincular, y la pantalla "Conecte al paciente" los pide. Si un chip responde en 0x68/0x69 pero no se reconoce, el monitor serie dice su `WHO_AM_I` (se aceptan el MPU6050 y sus variantes MPU6500, 6515, 9250 y 9255; el de este GY-521 es un MPU-6515, `0x74`).
 
 **Antes del QR.** Recién encendido, mientras el backend no le dice nada y si no está en un paciente, la OLED principal muestra "Conectando" con el Wi-Fi y el servidor. Si ninguna red de `secretos.h` está a la vista, el monitor serie lista las que sí ve. El ESP32 solo usa **2,4 GHz**: el hotspot de un iPhone necesita *Maximizar compatibilidad*. El nombre de la red se compara sin distinguir mayúsculas (`Iphone` encuentra `iPhone`).
 
 **Sesión de monitoreo** (`tesis/sesion.h`). Al encender, tras el chequeo de arranque, el equipo queda en **espera del paciente**: la pantalla "Conecte al paciente" marca cada sensor con ✓ (en el paciente), ○ (falta colocarlo) o ✗ (no instalado), y **no se envía nada al backend** (tampoco caídas: mover la placa sin paciente no es una caída). **Poner el dedo en el oxímetro (1 s) inicia el monitoreo**; desde ahí cada sensor se usa y se envía apenas se conecta (los electrodos o la sonda pueden ponerse después). La sesión termina tras 60 s sin dedo, sin electrodos y sin sonda en la piel. Si el oxímetro no está instalado, inicia con los electrodos o la sonda.
 
-**OLED principal (128x64).** Las 16 filas de arriba (amarillas en las OLED bicolor) son el encabezado:
+**Con el paciente, cada OLED tiene lo suyo (firmware 2.4).** La principal es solo del paciente y la de 128x32 lleva el estado del equipo y el ECG: nada queda amontonado.
+
+**OLED principal (128x64).** Arriba, en la franja amarilla de las bicolor, la cama y las iniciales del paciente (`MED-B-01  R.M.`, nunca el nombre) y las etiquetas; en el resto, los signos en grande:
+
+| Elemento | Significado |
+|---|---|
+| `FC ♥  ECG/PPG` | El corazón late con cada latido; `ECG` o `PPG` indica de dónde sale la FC |
+| Número grande a la izquierda / derecha | FC (lpm) y SpO2 (%). Bajo la SpO2, la barra de progreso de la medición (4 latidos) |
+| Celda de temperatura | El valor y `°C`; `..` mientras se estabiliza. **Fuera de lo normal (hipotermia, baja, fiebre), la celda va en negativo** para que salte a la vista. `Coloque la sonda` si está al aire; `Sin sonda` si no está instalada |
+| Celda de FR | El valor en rpm y de dónde salió: `MPU`, `ECG`, `PPG` o `M+P` (los dos coinciden). Sin FR: `--` y `mov.` si el paciente se mueve |
+| Píldora del pie | Tras una caída: `¡CAIDA DETECTADA!` parpadeando durante 30 s; un aviso del backend (`Repita: presion`) durante 15 s; con la batería crítica, `Batería baja: cargue` alternando cada 2 s con las celdas |
+
+**OLED del ECG (128x32), con el paciente.** Arriba, el estado del equipo, que antes ocupaba la principal:
 
 | Elemento | Significado |
 |---|---|
 | Barras | Señal Wi-Fi. Animadas: buscando red |
 | Nube llena | Conectado al broker. Vacía parpadeando: intentando. Con `!`: usuario o clave MQTT rechazados |
 | `↑12` | Lecturas guardadas esperando envío |
+| `87%` y la pila | Carga de la batería. Una barra: baja (20 % o menos); parpadea: crítica (10 % o menos); `--`: sin el divisor (ver *Batería*) |
 | `14:05` | Hora local (NTP). `--:--`: todavía sin hora |
-| `FC ♥  ECG/PPG` | El corazón late con cada latido; `ECG` o `PPG` indica de dónde sale la FC |
-| Barra bajo SpO2 | Progreso de la medición (4 latidos) |
-| `MOV` | El acelerómetro detecta movimiento |
-| Fila inferior | A la izquierda, la temperatura; a la derecha, su rango NEWS2 (Hipotermia, Baja, Normal, Fiebre, Fiebre alta) o `midiendo` mientras se estabiliza, y debajo la **FR** (`FR 16/min`; `FR midiendo` mientras junta 32 s quietos; `FR: quieto` si el paciente se mueve; `FR --` si no detecta respiración). `Coloque la sonda` si la sonda está al aire. Tras una caída: `¡CAIDA DETECTADA!` parpadeando durante 30 s; un aviso del backend (`Repita: presion`) se muestra igual durante 15 s |
-| Encabezado del paciente | Ya vinculado, "Conecte al paciente" y la pantalla de espera muestran la cama y las iniciales (`MED-B-01  R.M.`): nunca el nombre |
 
-Sin dedo ni electrodos muestra el código del dispositivo, la red y la indicación de colocar el dedo.
+Debajo, el ECG en barrido a todo lo ancho (~4 s), sobre la cuadrícula de puntos, con el corazón que late con cada QRS.
 
-**OLED del ECG (128x32).** Durante el arranque muestra su propia verificación: arriba, lo que falta ahora (`Falta acelerometro`, `Buscando Wi-Fi`, `Esperando servidor`…) y cuántos de los seis chequeos están listos; en medio, un latido animado que recorre la pantalla, y abajo, una barra de progreso. Al terminar dice `Todo listo 6/6`. Mientras se vincula muestra los tres pasos (QR, App, Listo) y qué hacer ahora (`Escanee el QR`, `Registrando...`, `Listo: MED-B-01`). Vinculado, pasa al ECG: trazo en barrido como en un monitor de cabecera (escala automática, ~3 s de trazo) y, a la derecha, la FC calculada del ECG con un corazón que late con cada QRS. El trazo es una línea fina y solo los QRS se dibujan de mínimo a máximo, así el ruido leve no lo engrosa. Sin electrodos parpadea "Electrodos desconectados". Si la señal es inservible (mucha interferencia de 60 Hz o el AD8232 saturado), en vez de dibujar el ruido muestra "Señal con ruido" y alterna "Fije electrodos" con "Revise el RL", y el ECG no informa FC. La OLED principal nunca muestra el ECG.
+Sin dedo ni electrodos, la principal muestra la indicación de colocar el dedo; sin paciente, "Conecte al paciente" con ✓, ○ o ✗ por sensor. Durante el arranque, el QR y los mensajes de la vinculación, la principal lleva su propia barra de estado (la de 128x32 muestra los pasos).
+
+**OLED del ECG (128x32).** Durante el arranque muestra su propia verificación: arriba, lo que falta ahora (`Sin acelerometro`, `Buscando Wi-Fi`, `Al servidor...`…) y, en una píldora, cuántos de los seis chequeos están listos; en medio, un latido animado que recorre la pantalla, y abajo, una barra de progreso. Al terminar dice `Todo listo` con `6/6`. Mientras se vincula muestra los tres pasos (QR, App, Listo) y qué hacer ahora (`Escanee el QR`, `Registrando...`, `Listo: MED-B-01`). Vinculado, pasa al ECG: trazo en barrido sobre una cuadrícula de puntos cada 8 px (como el papel de un electrocardiógrafo), como en un monitor de cabecera (escala automática, ~3 s de trazo) y, a la derecha, la píldora `ECG` con un corazón que late con cada QRS y la FC calculada del ECG. El trazo es una línea fina y solo los QRS se dibujan de mínimo a máximo, así el ruido leve no lo engrosa. Sin electrodos muestra "Conecte los electrodos" con el ícono de un electrodo que parpadea, sobre la línea de base quieta. Si la señal es inservible (mucha interferencia de 60 Hz o el AD8232 saturado), en vez de dibujar el ruido muestra "Señal con ruido" y alterna "Fije electrodos" con "Revise el RL", y el ECG no informa FC. La OLED principal nunca muestra el ECG.
 
 `tesis/pruebas/vista_previa.sh` regenera `pantallas_oled.png` con el código real del firmware.
 
@@ -190,6 +241,17 @@ Sin dedo ni electrodos muestra el código del dispositivo, la red y la indicaci�
 Apagado = algo falla. Cada vez que cambia, el monitor serie dice qué falta (`LED verde apagado: falta OLED-ECG MQTT`). El LED no depende del paciente: sin dedo ni electrodos el equipo igual está bien y el LED sigue encendido.
 
 ## Algoritmos
+
+**FR combinada (firmware 2.4, `fr_cardiaca.h`).** Además de la del MPU6050, la FR se calcula desde el pulso, con las tres huellas que deja la respiración en cada latido (Charlton 2016; Karlen 2013):
+
+- **FM:** arritmia sinusal respiratoria. Al inspirar el corazón se acelera: los intervalos RR oscilan al ritmo de la respiración.
+- **AM:** la amplitud del latido (la onda R del ECG, el AC del PPG).
+- **Línea de base** del PPG.
+
+Cada serie latido a latido se interpola a 4 Hz y se le busca el período con la autocorrelación, en ventanas de 32 s. Solo vale si **al menos dos huellas coinciden** (±4 rpm) y si hay al menos 2,5 latidos por respiración (Nyquist). Los intervalos raros, por un latido perdido o una extrasístole, no entran en la FM.
+
+**Fusión con el MPU.** Si el MPU y el pulso coinciden (±4 rpm) se promedian, con doble peso al MPU, que mide el tórax directo. Si no coinciden, manda el MPU. Si el MPU no tiene FR, porque el paciente se mueve o el wearable quedó flojo, la del pulso cubre el hueco. La celda FR de la OLED dice de dónde salió: `MPU`, `ECG`, `PPG` o `M+P` (los dos). La que se envía al backend es la combinada.
+
 
 - **PPG (FC y SpO2):** lectura del FIFO completo del MAX30102 a 100 Hz (el driver de SparkFun guardaba 4 muestras y perdía el resto); pasa-banda 0,5–5 Hz; latidos por función suma de pendientes con umbral adaptativo y refractario; FC con la mediana de los últimos RR y promedio de los cercanos a ella; SpO2 por razón de razones latido a latido con la curva de Maxim (`SPO2_A/B/C`). El dedo se detecta por salto sobre la luz ambiente y se libera tras 8 s sin pulso.
 - **ECG:** muestreo a 250 Hz exactos en una tarea propia (antes quedaban huecos cada vez que se dibujaba la pantalla); pasa-altos 0,5 Hz, notch de 60 Hz y pasa-bajos 40 Hz para el trazo; detector QRS de Pan-Tompkins con rechazo de ondas T y búsqueda hacia atrás. Si los electrodos dan un ritmo confiable, la FC enviada sale del ECG. Calidad de la señal: mide la interferencia de la red (lo que quita el notch) y la fracción de muestras saturadas; con más de 200 conteos RMS o más del 2 % saturado la señal es ruidosa (se recupera bajo 140 y 0,5 %), no da FC y la OLED lo avisa. Las muestras saturadas no entran al trazo.
@@ -220,6 +282,17 @@ El wearable se asigna a un paciente escaneando el QR de su OLED con la app de en
 - Pide un QR nuevo (`{"accion":"solicitar-qr"}` en `device/ESP32-001/solicitudes`) si al conectarse no llega ningún comando en 5 s, si el QR venció o si se pulsa **BOOT** en la pantalla del QR (como máximo uno cada 10 s). El backend, además, renueva solo los QR vencidos.
 - **El QR:** generador de Nayuki (`qrcodegen.c`, MIT), la versión más chica en la que entra el texto (la 2, de 25x25, con el código `ESP32-001`; hasta la 3 con códigos de 32 caracteres), corrección M o mayor, oscuro sobre un cuadro claro de 64x64 y a 2 px por módulo. Va a 4 px del borde de arriba: en las OLED bicolor, la franja sin píxeles entre la zona amarilla y la azul (filas 15 y 16) cortaba sus patrones de posición y no se leía; así solo engrosa una fila oscura. Se comprobó leyendo la imagen de `vista_previa` con un lector de QR (zxing), con y sin la franja simulada.
 - La librería `QRCode` de ricmoo no se usa: su `qrcode.h` choca con el del core ESP32 3.x. El core también trae un `qrcodegen` dentro de `libespressif__qrcode.a`, pero como el firmware no llama a `esp_qrcode_*`, el enlazador usa el del sketch.
+
+## Configurar el Wi-Fi desde la app (Bluetooth)
+
+El wearable cambia de red seguido (casa, hotspot, hospital) y, sin red, el backend no puede mandarle nada. Por eso la red se configura **desde la app, con la cuenta de administrador, directo por Bluetooth** (`config_wifi.h`), con el protocolo de aprovisionamiento oficial de Espressif (protocomm, *Security 1*: Curve25519 + AES-CTR):
+
+1. **Entrar al modo:** BOOT apretado 3 s, o solo: si en 1 min desde el encendido no se unió a ninguna red conocida y no está con un paciente. En el monitor serie, la tecla `w` hace lo mismo.
+2. **La OLED muestra el QR de Wi-Fi** `VTFW:{codigo}:{codigo de un solo uso}` y, debajo, ese código de 8 caracteres (sin 0/O ni 1/I/L) para escribirlo si la cámara no lee. El código cambia cada vez que se entra: solo quien tiene el wearable en la mano puede configurarlo. La OLED de 128x32 muestra los pasos QR → Red → Listo.
+3. **En la app** (*Sensores → Escanear el QR de Wi-Fi*): se conecta por Bluetooth a `VTF-{codigo}` y muestra **las redes que ve el wearable**, con su señal y si tienen clave (solo 2,4 GHz). Se elige una y se escribe la clave.
+4. El wearable la prueba: si la clave está mal o no encuentra la red, la app lo dice y se corrige ahí mismo. Si conecta, **la guarda en la flash** (hasta 5 redes, la más reciente primero; se suman a las de `secretos.h`) y se reinicia ya conectado.
+
+Se sale con BOOT (se reinicia sin guardar) o solo a los 10 min. Mientras dura, la tarea de red queda en pausa (sin MQTT) y no se envían lecturas. El Bluetooth solo se enciende en este modo. La red y la clave nunca pasan por el backend, y la clave nunca se imprime.
 
 ## Conectividad
 
@@ -263,7 +336,7 @@ El backend ya lee este broker (`Backend/src/Vitalify.Api/Entrada/Mqtt/ReceptorMq
 
 | Qué muestra la OLED | Causa probable | Qué hacer |
 |---|---|---|
-| Barras animadas, "buscando Wi-Fi" | Ninguna red de `secretos.h` al alcance | Red de 2,4 GHz y SSID exacto (con mayúsculas y espacios) |
+| Barras animadas, "buscando Wi-Fi" | Ninguna red conocida al alcance | Configurarla desde la app (ver *Configurar el Wi-Fi desde la app*); entra solo al modo al minuto. O agregarla a `secretos.h` (2,4 GHz, SSID exacto) |
 | "clave Wi-Fi?" | Contraseña incorrecta | Corregir `secretos.h` |
 | "Pidiendo el QR" que no cambia | El backend no recibió la solicitud o no conoce el sensor | El sensor debe estar registrado en el backend y el broker reiniciado con el ACL nuevo (permite `solicitudes`); BOOT pide otro |
 | El QR aparece pero la app no lo lee | Brillo o distancia | Acercar el celular a 10–15 cm y de frente. Si dice "vencido", BOOT pide otro |
@@ -274,12 +347,14 @@ El backend ya lee este broker (`Backend/src/Vitalify.Api/Entrada/Mqtt/ReceptorMq
 | "esperando hora NTP" (producción) | La red no deja salir al NTP; sin hora no se intenta TLS | Usar una red con Internet (el hotspot sirve) |
 | "TLS: certificado?" (producción) | El certificado del servidor no validó: dominio mal escrito en `MQTT_BROKER_TLS` o una cadena que no termina en ISRG Root X1/X2 | Revisar el dominio; el monitor serie muestra los *flags* de mbedTLS. Desde la Mac: `openssl s_client -connect DOMINIO:8883 -servername DOMINIO` |
 | `--:--` y `↑N` creciendo | Sin NTP (la red no tiene salida a internet) | Las lecturas se guardan y se envían al tener hora |
-| "Electrodos desconectados" | LO+ o LO− en alto | Revisar electrodos y que SDN no esté a GND |
+| "Conecte los electrodos" | LO+ o LO− en alto | Revisar electrodos y que SDN no esté a GND |
 | "Sin sonda temp." | DS18B20 sin respuesta | Revisar la resistencia de 4,7 kΩ y GPIO4 |
 | "Coloque la sonda" | La sonda está al aire o en la mano (< 32 °C) | Colocarla en la axila y esperar a que deje de decir `midiendo` |
 | "Señal con ruido" en la OLED del ECG | El AD8232 se satura o entra mucha interferencia de 60 Hz: electrodos secos o mal pegados, falta el RL o se sostienen con los dedos. El monitor serie dice cuánto (`ECG: senal con ruido (red N RMS, saturada N%)`) | Electrodos nuevos con gel, sobre la piel limpia: RA (rojo) bajo la clavícula derecha, LA (amarillo) bajo la izquierda y RL (verde) en el abdomen, abajo a la derecha. Jack de 3,5 mm bien metido, quieto al medir y los cables lejos del cargador de la laptop |
 | OLED del ECG apagada | No responde en el bus 1 (al arrancar, el monitor serie muestra `I2C bus 1 (SDA=13, SCL=14): ninguno`; si una línea está en bajo, antes dice cuál: `I2C bus 1: SCL en bajo en reposo`) | Revisar SDA/SCL de la OLED 128x32 (DevKit: D13 y D14) y su alimentación. Se reconecta sola en 5 s |
 | Ambas OLED apagadas y el monitor serie repite `boot:0x33` e `invalid magic number` | GPIO12 está en alto al reiniciar (un cable en D12) y la flash queda a 1,8 V | Sacar ese cable de D12 (la OLED del ECG va en D13 y D14) y reiniciar con EN |
+| Batería `--` | Falta el divisor en VP o está suelto (el monitor serie dice `Bateria -- (pin N mV)`) | Conectar el divisor (ver *Batería*) |
+| `Batería baja: cargue` | 10 % o menos de carga | Cargar por el USB-C del módulo de carga |
 | LED verde apagado | Algo de la lista del LED falla | El monitor serie dice qué falta (`LED verde apagado: falta ...`). Si no dice nada y el LED no prende, revisar la polaridad y la resistencia |
 
 ## Limitaciones
@@ -287,5 +362,8 @@ El backend ya lee este broker (`Backend/src/Vitalify.Api/Entrada/Mqtt/ReceptorMq
 - La SpO2 usa la curva genérica de Maxim. Para la tesis conviene calibrar `SPO2_A/B/C` contra un oxímetro de referencia. No es un dispositivo médico certificado.
 - El DS18B20 mide la superficie donde está apoyado: en la piel marca menos que la temperatura central.
 - El búfer está en RAM: si el ESP32 se reinicia, se pierde lo que no se había enviado.
-- El firmware ocupaba el 88 % de la partición de la app en el DevKit (86 % en el S3); la FR y el QR suman unos 15 KB. Si se agregan funciones, elegir el esquema de particiones *Huge APP*.
+- El firmware ocupa ~2 MB, el 64 % de la partición *Huge APP* (3 MB). Ese esquema no deja lugar para actualizar por aire (OTA), que este proyecto no usa.
+- La configuración del Wi-Fi por Bluetooth guarda las claves en la flash (NVS) sin cifrar, como el propio Wi-Fi del ESP32. Para producción conviene activar el cifrado de la flash.
+- La FR desde el pulso se probó con latidos sintéticos (arritmia sinusal, amplitud y línea de base moduladas, ruido, latidos perdidos). Para la tesis conviene validarla, igual que la del MPU, contra el conteo manual de 60 s.
 - La FR se probó con señales sintéticas (inclinación del tórax, ruido del sensor, latido y movimiento). Para la tesis conviene validarla contra el conteo manual de 60 s de una enfermera, con el wearable en la posición en que se usará.
+- El porcentaje de batería sale de una curva típica de LiPo, no de un medidor de carga (*fuel gauge*): es orientativo (±10 %) y baja un poco al transmitir. Para la tesis conviene registrar una descarga completa con el monitor serie y ajustar la curva.
