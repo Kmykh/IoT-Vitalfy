@@ -2,7 +2,7 @@
 // (Vitalify/Backend/docs/contrato-telemetria.md, "Comandos al wearable", y docs/vinculacion-qr.md).
 //
 // El backend publica en device/<codigo>/comandos (QoS 1; los marcados con R van retenidos):
-//   {"accion":"mostrar-qr","qr":"VTF1:ESP32-001:K7P3QX9M","expira":"2026-11-02T15:10:00Z"}   R
+//   {"accion":"mostrar-qr","qr":"VTF1:VTLY-001:K7P3QX9M","expira":"2026-11-02T15:10:00Z"}   R
 //   {"accion":"emparejando","expira":"2026-11-02T15:05:00Z"}    (expira: hasta cuándo puede confirmar la app)
 //   {"accion":"vinculado","cama":"MED-B-01","iniciales":"R.M."}                              R
 //   {"accion":"desvinculado"}                                                                R
@@ -58,7 +58,7 @@ extern const char kSolicitudQr[];  // {"accion":"solicitar-qr"}
 
 // QR de la vinculación (generador de Nayuki, qrcodegen.c). La versión más chica en la que entra el texto,
 // hasta la 3 (29x29 módulos: a 2 px por módulo son 58 px, lo que cabe en los 64 px de alto de la OLED),
-// con corrección de errores M o mayor si cabe en la misma versión. "VTF1:ESP32-001:K7P3QX9M" usa la
+// con corrección de errores M o mayor si cabe en la misma versión. "VTF1:VTLY-001:K7P3QX9M" usa la
 // versión 2 (25x25): 50 px y 7 px de margen claro arriba y abajo.
 const int kQrVersionMaxima = 3;
 const int kQrTamBuffer = ((kQrVersionMaxima * 4 + 17) * (kQrVersionMaxima * 4 + 17) + 7) / 8 + 1;

@@ -1,7 +1,7 @@
 // telemetria.h — Lectura de signos vitales y su JSON según el contrato del backend
 // (Vitalify/Backend/docs/contrato-telemetria.md):
 //
-//   {"dispositivo":"ESP32-001","ts":"2026-09-30T14:05:10.250Z","seq":18234,
+//   {"dispositivo":"VTLY-001","ts":"2026-09-30T14:05:10.250Z","seq":18234,
 //    "fc":82,"fr":16,"spo2":97,"temp":36.8,"caida":false,"bateria":87}
 //
 // Una variable que el sensor no midió se omite (el backend la trata como ausente). La FR sale del

@@ -2,7 +2,7 @@
 # Muestra en vivo todo lo que publican los wearables (telemetría y estado), con el usuario del
 # backend. Es exactamente lo que recibirá el adaptador MQTT del backend.
 #   ./escuchar.sh              todos los dispositivos
-#   ./escuchar.sh ESP32-001    uno solo
+#   ./escuchar.sh VTLY-001    uno solo
 set -eu
 cd "$(dirname "$0")"
 . ./.env
