@@ -18,7 +18,7 @@
 //   Sin vincular: el QR (esquinas redondeadas) y, a la derecha, qué hacer y cuánto le queda
 //   ┌──────────┬───────────────────┐          ┌──────────────────────────────┐
 //   │╭▓▓ QR ▓▓╮│ ▂▄▆█ ☁     87▕▓▓▏ │          │ Escanee el QR          (1/3) │
-//   │ ▓▓▓▓▓▓▓▓ │     ESP32-001     │          │  (1)·········(2)·········(3) │
+//   │ ▓▓▓▓▓▓▓▓ │     VTLY-001      │          │  (1)·········(2)·········(3) │
 //   │ ▓▓▓▓▓▓▓▓ │      Escanee      │          │  QR          App       Listo │
 //   │ ▓▓▓▓▓▓▓▓ │     con la app    │          └──────────────────────────────┘
 //   │ ▓▓▓▓▓▓▓▓ │      ◷ 9:32       │
@@ -28,7 +28,7 @@
 //   Mensajes (conectando, pidiendo QR, QR vencido, emparejando, vinculado, liberado)
 //   ┌──────────────────────────────┐
 //   │ ▂▄▆█ ☁         87%▕▓▓▓▏ 14:05 │   barra de estado
-//   │          ESP32-001           │   contexto: código del sensor, o cama e iniciales
+//   │          VTLY-001            │   contexto: código del sensor, o cama e iniciales
 //   │      ✔  Vinculado            │   ícono + título, centrados juntos
 //   │       MED-B-01  R.M.         │   subtítulo
 //   │ ( Coloque los sensores     ) │   pie: píldora con borde = qué hacer;

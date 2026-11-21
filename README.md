@@ -18,16 +18,16 @@ MPU6050  (caídas,  ─┘                            en la laptop)             
 
 | Aspecto | Valor |
 |---|---|
-| Tópico | `device/ESP32-001/telemetria` |
+| Tópico | `device/VTLY-001/telemetria` |
 | QoS | 1: el ESP32 guarda cada lectura hasta que el broker confirma (PUBACK) |
 | Frecuencia | Una lectura por segundo (desde el 2026-11-21, para ver los signos en vivo en la app), y otra al instante si se detecta una caída. Sin red, el búfer guarda una cada 10 s (y todas las caídas): sus 360 lecturas cubren 1 h |
 | Formato | JSON de `Backend/docs/contrato-telemetria.md` |
-| Estado del wearable | `device/ESP32-001/estado` = `online` / `offline` (retenido; `offline` lo publica el broker si el ESP32 desaparece) |
-| Comandos del backend | `device/ESP32-001/comandos`: QR para vincular, `emparejando`, `vinculado` (cama e iniciales), `desvinculado` (ver *Vinculación por QR*) |
-| Solicitudes | `device/ESP32-001/solicitudes`: el wearable pide un QR nuevo con `{"accion":"solicitar-qr"}` |
+| Estado del wearable | `device/VTLY-001/estado` = `online` / `offline` (retenido; `offline` lo publica el broker si el ESP32 desaparece) |
+| Comandos del backend | `device/VTLY-001/comandos`: QR para vincular, `emparejando`, `vinculado` (cama e iniciales), `desvinculado` (ver *Vinculación por QR*) |
+| Solicitudes | `device/VTLY-001/solicitudes`: el wearable pide un QR nuevo con `{"accion":"solicitar-qr"}` |
 
 ```json
-{"dispositivo":"ESP32-001","ts":"2026-09-30T14:05:10.250Z","seq":18234,"fc":82,"fr":16,"spo2":97,"temp":36.8,"caida":false,"bateria":87}
+{"dispositivo":"VTLY-001","ts":"2026-09-30T14:05:10.250Z","seq":18234,"fc":82,"fr":16,"spo2":97,"temp":36.8,"caida":false,"bateria":87}
 ```
 
 - `ts` es el instante de la medición en UTC (NTP), con milisegundos. Una lectura tomada antes de tener hora recibe su hora real al sincronizar.
@@ -81,7 +81,7 @@ Sin Terminal: en **Docker Desktop → Containers → vitalify-broker → vitalif
 
 ### 2. Registrar el sensor en el backend
 
-El código `ESP32-001` debe existir (`POST /api/v1/dispositivos`, o `Seed__DatosDemo=true` en Development). Al conectarse, el backend le manda su QR y la OLED lo muestra: la enfermera lo escanea con la app y registra al paciente (ver *Vinculación por QR*). Mientras no esté vinculado, el wearable no envía lecturas.
+Cada wearable tiene un **código único**: `VTLY` y su número (`VTLY-001`, `VTLY-002`…), en `CODIGO_DISPOSITIVO` de `config.h`. Ese código debe existir en Vitalify (`POST /api/v1/dispositivos`) y es también su usuario MQTT: en el broker de producción se agrega con `Backend/scripts/agregar-wearable-mqtt.sh VTLY-002`. Al conectarse, el backend le manda su QR y la OLED lo muestra: la enfermera lo escanea con la app y registra al paciente (ver *Vinculación por QR*). Mientras no esté vinculado, el wearable no envía lecturas.
 
 Si actualizaste desde una versión anterior, **reinicia el broker** (`docker compose restart` en `broker/`): el ACL ahora permite las solicitudes de QR.
 
@@ -120,7 +120,7 @@ Monitor serie a 115200 baudios:
 [red] Broker MacBook-Air-de-Mayck.local -> 192.168.1.7
 [red] MQTT conectado a 192.168.1.7:1883
 [cmd] vinculado: cama MED-B-01, R.M.
-[mqtt] device/ESP32-001/telemetria {"dispositivo":"ESP32-001","ts":"2026-09-30T14:05:10.250Z","seq":0,...}
+[mqtt] device/VTLY-001/telemetria {"dispositivo":"VTLY-001","ts":"2026-09-30T14:05:10.250Z","seq":0,...}
 MONITOREO (vinculado) | FC 72 (PPG) | SpO2 98 | FR 16 | dedo SI IR 52341 PI 1.20% | T 36.8 C | reposo | ECG sin electrodos | Wi-Fi MiRedCasa -58 dBm | MQTT OK | pendientes 0, enviadas 12
 ```
 
@@ -267,11 +267,11 @@ tesis/pruebas/ejecutar.sh      # FC 40–200 lpm, SpO2, ruido, dícrota, onda T,
 
 ## Vinculación por QR
 
-El wearable se asigna a un paciente escaneando el QR de su OLED con la app de enfermería (`Backend/docs/vinculacion-qr.md`). El firmware sigue los comandos que publica el backend en `device/ESP32-001/comandos` (`tesis/vinculacion.h`):
+El wearable se asigna a un paciente escaneando el QR de su OLED con la app de enfermería (`Backend/docs/vinculacion-qr.md`). El firmware sigue los comandos que publica el backend en `device/VTLY-001/comandos` (`tesis/vinculacion.h`):
 
 | Comando | Pantalla | Telemetría |
 |---|---|---|
-| `mostrar-qr` (retenido) | El QR (`VTF1:ESP32-001:K7P3QX9M`) y cuánto le queda | No envía y descarta lo guardado |
+| `mostrar-qr` (retenido) | El QR (`VTF1:VTLY-001:K7P3QX9M`) y cuánto le queda | No envía y descarta lo guardado |
 | `emparejando` | "Emparejando" con cuánto le queda a la app (`expira`). Si vence sin `vinculado`, pide un QR nuevo solo (sin hora o sin `expira`, a los 6 min); BOOT también lo pide | No envía |
 | `vinculado` (retenido) | 5 s de "✓ Vinculado" (si venía del QR o del emparejamiento) y después el flujo normal, con la cama y las iniciales | Envía una lectura por segundo y al instante si hay una caída |
 | `desvinculado` (retenido) | 5 s de "Desvinculado" y pide el QR nuevo (llega enseguida) | No envía y descarta lo guardado (era del paciente anterior) |
@@ -279,8 +279,8 @@ El wearable se asigna a un paciente escaneando el QR de su OLED con la app de en
 
 - Al conectarse, se suscribe a sus comandos antes de publicar `online`: el comando retenido le dice enseguida si sigue vinculado. Hasta recibirlo no vacía el búfer.
 - Recién encendido y sin broker, mide y guarda como siempre; si al conectarse resulta que no estaba vinculado, descarta esas lecturas.
-- Pide un QR nuevo (`{"accion":"solicitar-qr"}` en `device/ESP32-001/solicitudes`) si al conectarse no llega ningún comando en 5 s, si el QR venció o si se pulsa **BOOT** en la pantalla del QR (como máximo uno cada 10 s). El backend, además, renueva solo los QR vencidos.
-- **El QR:** generador de Nayuki (`qrcodegen.c`, MIT), la versión más chica en la que entra el texto (la 2, de 25x25, con el código `ESP32-001`; hasta la 3 con códigos de 32 caracteres), corrección M o mayor, oscuro sobre un cuadro claro de 64x64 y a 2 px por módulo. Va a 4 px del borde de arriba: en las OLED bicolor, la franja sin píxeles entre la zona amarilla y la azul (filas 15 y 16) cortaba sus patrones de posición y no se leía; así solo engrosa una fila oscura. Se comprobó leyendo la imagen de `vista_previa` con un lector de QR (zxing), con y sin la franja simulada.
+- Pide un QR nuevo (`{"accion":"solicitar-qr"}` en `device/VTLY-001/solicitudes`) si al conectarse no llega ningún comando en 5 s, si el QR venció o si se pulsa **BOOT** en la pantalla del QR (como máximo uno cada 10 s). El backend, además, renueva solo los QR vencidos.
+- **El QR:** generador de Nayuki (`qrcodegen.c`, MIT), la versión más chica en la que entra el texto (la 2, de 25x25, con el código `VTLY-001`; hasta la 3 con códigos de 32 caracteres), corrección M o mayor, oscuro sobre un cuadro claro de 64x64 y a 2 px por módulo. Va a 4 px del borde de arriba: en las OLED bicolor, la franja sin píxeles entre la zona amarilla y la azul (filas 15 y 16) cortaba sus patrones de posición y no se leía; así solo engrosa una fila oscura. Se comprobó leyendo la imagen de `vista_previa` con un lector de QR (zxing), con y sin la franja simulada.
 - La librería `QRCode` de ricmoo no se usa: su `qrcode.h` choca con el del core ESP32 3.x. El core también trae un `qrcodegen` dentro de `libespressif__qrcode.a`, pero como el firmware no llama a `esp_qrcode_*`, el enlazador usa el del sketch.
 
 ## Configurar el Wi-Fi desde la app (Bluetooth)

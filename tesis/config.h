@@ -10,9 +10,11 @@
 #define FIRMWARE_VERSION "2.5.0"
 
 // ============================ Dispositivo ============================
-// Código con el que el administrador registró el sensor en Vitalify (POST /api/v1/dispositivos,
-// patrón ^[A-Z0-9-]{3,32}$). Es también el usuario MQTT y el client id.
-#define CODIGO_DISPOSITIVO "ESP32-001"
+// Código único con el que el administrador registró el wearable en Vitalify (POST /api/v1/dispositivos,
+// patrón ^[A-Z0-9-]{3,32}$): VTLY y su número (VTLY-001, VTLY-002...), uno distinto por wearable. Es también
+// el usuario MQTT y el client id, así que cada código nuevo necesita su usuario en el broker
+// (Backend/scripts/agregar-wearable-mqtt.sh VTLY-002).
+#define CODIGO_DISPOSITIVO "VTLY-001"
 
 // ============================ Red: broker MQTT ============================
 // Desarrollo: nombre mDNS de la laptop con Mosquitto (no cambia cuando el DHCP le da otra IP), 1883 sin TLS.
