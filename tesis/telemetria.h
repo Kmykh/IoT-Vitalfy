@@ -37,6 +37,29 @@ inline void asignarHora(Lectura& l, int64_t ahoraEpochMs, int64_t ahoraMonoUs) {
 
 // Búfer circular de lecturas a la espera de que el broker confirme su recepción.
 // Sale primero la más antigua; si se llena, se descarta la más antigua.
+// Sin broker, el búfer guarda una lectura cada `intervaloUs` y todas las caídas: con una lectura por segundo, las
+// lecturas del búfer siguen cubriendo 1 h en vez de 6 min. Con el broker conectado pasa todo (en vivo).
+class MuestreoSinRed {
+ public:
+  explicit MuestreoSinRed(int64_t intervaloUs) : intervaloUs_(intervaloUs) {}
+
+  bool aceptar(const Lectura& l, bool conectado) {
+    if (conectado) {
+      ultimaUs_ = 0;  // al caerse la red, la primera lectura se guarda
+      return true;
+    }
+    if (l.caida || ultimaUs_ == 0 || l.monoUs - ultimaUs_ >= intervaloUs_) {
+      ultimaUs_ = l.monoUs;
+      return true;
+    }
+    return false;
+  }
+
+ private:
+  int64_t intervaloUs_;
+  int64_t ultimaUs_ = 0;
+};
+
 template <int N>
 class BuferLecturas {
  public:
