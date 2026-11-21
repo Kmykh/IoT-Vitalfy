@@ -159,10 +159,13 @@ void atenderHora() {
 }
 
 // ---------- Búfer ----------
+MuestreoSinRed muestreoSinRed((int64_t)INTERVALO_BUFER_OFFLINE_MS * 1000);
+
 void recibirLecturas() {
   Lectura l;
   while (xQueueReceive(colaLecturas, &l, 0) == pdTRUE) {
     if (!vinculo.aceptaLecturas()) continue;  // el loop la mandó justo antes de enterarse del cambio
+    if (!muestreoSinRed.aceptar(l, mqttConectado)) continue;  // sin red, una cada 10 s: el búfer sigue cubriendo 1 h
     if (estado.horaSincronizada) asignarHora(l, ahoraEpochMs(), esp_timer_get_time());
     if (!bufer.agregar(l)) enVuelo = false;  // lleno: salió la más antigua, que era la que estaba en vuelo
   }

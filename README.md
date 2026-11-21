@@ -20,7 +20,7 @@ MPU6050  (caídas,  ─┘                            en la laptop)             
 |---|---|
 | Tópico | `device/ESP32-001/telemetria` |
 | QoS | 1: el ESP32 guarda cada lectura hasta que el broker confirma (PUBACK) |
-| Frecuencia | Una lectura cada 10 s, y otra al instante si se detecta una caída |
+| Frecuencia | Una lectura por segundo (desde el 2026-11-21, para ver los signos en vivo en la app), y otra al instante si se detecta una caída. Sin red, el búfer guarda una cada 10 s (y todas las caídas): sus 360 lecturas cubren 1 h |
 | Formato | JSON de `Backend/docs/contrato-telemetria.md` |
 | Estado del wearable | `device/ESP32-001/estado` = `online` / `offline` (retenido; `offline` lo publica el broker si el ESP32 desaparece) |
 | Comandos del backend | `device/ESP32-001/comandos`: QR para vincular, `emparejando`, `vinculado` (cama e iniciales), `desvinculado` (ver *Vinculación por QR*) |
@@ -273,7 +273,7 @@ El wearable se asigna a un paciente escaneando el QR de su OLED con la app de en
 |---|---|---|
 | `mostrar-qr` (retenido) | El QR (`VTF1:ESP32-001:K7P3QX9M`) y cuánto le queda | No envía y descarta lo guardado |
 | `emparejando` | "Emparejando" con cuánto le queda a la app (`expira`). Si vence sin `vinculado`, pide un QR nuevo solo (sin hora o sin `expira`, a los 6 min); BOOT también lo pide | No envía |
-| `vinculado` (retenido) | 5 s de "✓ Vinculado" (si venía del QR o del emparejamiento) y después el flujo normal, con la cama y las iniciales | Envía cada 10 s y al instante si hay una caída |
+| `vinculado` (retenido) | 5 s de "✓ Vinculado" (si venía del QR o del emparejamiento) y después el flujo normal, con la cama y las iniciales | Envía una lectura por segundo y al instante si hay una caída |
 | `desvinculado` (retenido) | 5 s de "Desvinculado" y pide el QR nuevo (llega enseguida) | No envía y descarta lo guardado (era del paciente anterior) |
 | `repetir-medicion` | Aviso de 15 s en la fila inferior | Sin cambio |
 

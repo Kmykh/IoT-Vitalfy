@@ -14,6 +14,7 @@
 #include "ppg.h"
 #include "respiracion.h"
 #include "senales.h"
+#include "config.h"
 #include "telemetria.h"
 #include "sesion.h"
 #include "temperatura.h"
@@ -386,6 +387,32 @@ static void pruebasCaidas() {
     s.caminar(6);
     VERIFICAR(s.caidas == 0, "caída con recuperación inmediata: %d", s.caidas);
   }
+}
+
+static void pruebasMuestreoSinRed() {
+  printf("Lectura por segundo y búfer sin red\n");
+  VERIFICAR(INTERVALO_TELEMETRIA_MS == 1000, "intervalo: %d ms", INTERVALO_TELEMETRIA_MS);
+  MuestreoSinRed m((int64_t)INTERVALO_BUFER_OFFLINE_MS * 1000);
+  Lectura l;
+  int aceptadas = 0;
+  for (int s = 0; s < 60; s++) {  // un minuto con el broker conectado: pasan las 60
+    l.monoUs = (int64_t)s * 1000000;
+    aceptadas += m.aceptar(l, true);
+  }
+  VERIFICAR(aceptadas == 60, "conectado: %d de 60", aceptadas);
+  aceptadas = 0;
+  for (int s = 60; s < 120; s++) {  // un minuto sin red: una cada 10 s
+    l.monoUs = (int64_t)s * 1000000;
+    aceptadas += m.aceptar(l, false);
+  }
+  VERIFICAR(aceptadas == 6, "sin red: %d en 60 s", aceptadas);
+  l.monoUs = 121 * 1000000LL;
+  l.caida = true;
+  VERIFICAR(m.aceptar(l, false), "una caída sin red se guarda siempre");
+  l.caida = false;
+  l.monoUs = 122 * 1000000LL;
+  VERIFICAR(m.aceptar(l, true), "al volver la red pasa todo");
+  printf("  conectado 60/60, sin red 6/60 (360 lecturas = %d min)\n", CAPACIDAD_BUFER_OFFLINE * INTERVALO_BUFER_OFFLINE_MS / 60000);
 }
 
 static void pruebasTelemetria() {
@@ -1064,6 +1091,7 @@ int main() {
   pruebasCaidas();
   pruebasRespiracion();
   pruebasTelemetria();
+  pruebasMuestreoSinRed();
   pruebasBateria();
   pruebasRedes();
   pruebasFrCardiaca();
