@@ -30,7 +30,7 @@
 #define TOPICO_SOLICITUDES "device/" CODIGO_DISPOSITIVO "/solicitudes"  // el wearable pide un QR nuevo
 
 // ============================ Telemetría ============================
-#define INTERVALO_TELEMETRIA_MS 10000  // una lectura cada 10 s (frecuencia del contrato); una caída sale al instante
+#define INTERVALO_TELEMETRIA_MS 5000  // una lectura cada 5 s (contrato desde el 2026-11-21: signos en vivo en la app); una caída sale al instante
 #define CAPACIDAD_BUFER_OFFLINE 360    // lecturas guardadas sin red: 1 h (el backend acepta hasta 24 h de atraso)
 
 // ============================ Red: Wi-Fi y hora ============================
